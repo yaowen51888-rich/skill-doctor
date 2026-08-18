@@ -26,7 +26,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 | L1 静态 lint | `doctor.py lint`（机械部分）+ R2/R3 模型判断 | ✅ |
 | L3 历史触发审计 | `doctor.py usage`（仅 claude-code） | ✅ cc / ⬜ 其余平台 |
 | L2 回放触发测试 | `doctor.py trigger`（仅 claude-code，花真钱） | ✅ cc / ⬜ 其余平台 |
-| 成本账单 | token 归因 | ⬜ v2 |
+| 成本账单 | `doctor.py cost`（估算+实测，不出钱） | ✅ cc / ⬜ 其余平台 |
 
 ## 工作流
 
@@ -48,7 +48,10 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
    python <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json>
    ```
    输出 trigger_rate / false_trigger_rate / 逐 case 明细
-6. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
+6. **成本账单**（仅 cc，可选）：`doctor.py cost --skill <名> [--days 30]`
+   输出 description/body token 估算 + 调用轮 output_tokens 实测。
+   渲染报告时必须带上"估算口径、不折算金额"的说明
+7. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
 
 ## Lint 规则一览
 
@@ -72,7 +75,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 
 ## 路线图（勿提前实现）
 
-- v2 剩余：成本账单（token 归因）；L2/L3 扩展到 codex / dsh / openclaw / hermes
-- v3：OpenClaw 可见性审计、Hermes 漂移检测脚本化
+- v2 已全部落地（cc 平台）；扩展 trigger/usage/cost 到 codex / dsh / openclaw / hermes
+- v3：OpenClaw 可见性审计、Hermes 漂移检测脚本化、dsh fork 中段重放
 
 平台路径/日志格式/adapter 约定见 [PLATFORMS.md](PLATFORMS.md)。

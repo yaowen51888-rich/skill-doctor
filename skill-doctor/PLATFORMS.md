@@ -59,7 +59,9 @@ dsh fork 的独占优势是从真实会话**中段**重放。
    dsh durable 去重 / OpenClaw per-agent 可见性配置 / Hermes agent 自主加载），
    只分平台报告
 2. "56,804 个技能争 100 个触发位"是 claude-code 生态数字，引用必须标平台
-3. usage 字段完备度：cc ✅ dsh ✅ 其余未验证——账单功能在验证前只出 token 数不出钱
+3. usage 字段完备度：cc ✅（已实测：转录 `message.usage.output_tokens`，cost 子命令
+   23 样本 avg 358/max 1742）dsh ✅（`ctx.sessionQuery`）其余未验证——
+   只出 token 数不出钱，金额折算永远不做（费率是用户侧信息）
 
 ## 已知局限
 

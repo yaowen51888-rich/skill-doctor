@@ -7,6 +7,7 @@
   usage  扫 Claude Code 会话日志, 统计 Skill 工具调用(v1 仅 claude-code 实现, 其余平台见 PLATFORMS.md)
   lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
   trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
+  cost   成本账单: desc/body token 估算 + 调用轮 output_tokens 实测(不出钱, 仅 claude-code)
 
 用法:
   python doctor.py list [--platform claude-code]
@@ -302,6 +303,82 @@ def cmd_trigger(args):
     }, ensure_ascii=False, indent=2))
 
 
+def est_tokens(text):
+    """粗估 token: CJK ~1.6 字/token, 其余 ~4 字符/token。估算口径, 勿折算金额。"""
+    cjk = len(re.findall(r'[一-鿿]', text))
+    return int(cjk / 1.6 + (len(text) - cjk) / 4)
+
+
+def extract_calls_with_usage(line_text):
+    """返回 [(skill名, output_tokens|None)]。usage 兼容 message.usage 与顶层 usage 两种位置。"""
+    try:
+        obj = json.loads(line_text)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    msg = obj.get("message") if isinstance(obj, dict) else None
+    usage = None
+    for holder in (msg, obj):
+        if isinstance(holder, dict) and isinstance(holder.get("usage"), dict):
+            usage = holder["usage"]
+            break
+    out_toks = None
+    if usage:
+        for k in ("output_tokens", "outputTokens", "completion_tokens"):
+            if isinstance(usage.get(k), int):
+                out_toks = usage[k]
+                break
+    return [(n, out_toks) for n in extract_skill_calls(line_text)]
+
+
+def cmd_cost(args):
+    skills, _ = scan_skills(args.platform)
+    target = next((s for s in skills
+                   if is_target_skill(s.get("name", ""), args.skill)), None)
+
+    out = {"platform": args.platform, "skill": args.skill,
+           "note": "token 为估算/实测混合口径, 不折算金额"}
+
+    if target:
+        out["description_tokens_est"] = est_tokens(target.get("description", ""))
+        files = []
+        for f in sorted(Path(target["dir"]).rglob("*.md")):
+            try:
+                body = re.sub(r"^---\s*\n.*?\n---", "",
+                              f.read_text(encoding="utf-8", errors="replace"),
+                              flags=re.S)
+                files.append({"file": f.name, "tokens_est": est_tokens(body)})
+            except OSError:
+                continue
+        out["body_files_tokens_est"] = files
+    else:
+        out["dir_found"] = False
+        out["hint"] = "skill 目录不在当前扫描范围(可能装在别的项目), 仅输出调用统计"
+
+    # 历史调用 + 调用轮 output_tokens 实测
+    counter = Counter()
+    out_samples = []
+    for f in iter_cc_logs(args.days):
+        try:
+            for line in f.open(encoding="utf-8", errors="replace"):
+                if '"Skill"' not in line and '"skill"' not in line:
+                    continue
+                for n, t in extract_calls_with_usage(line):
+                    if is_target_skill(n, args.skill):
+                        counter[n] += 1
+                        if t is not None:
+                            out_samples.append(t)
+        except OSError:
+            continue
+    out["invocations"] = sum(counter.values())
+    if out_samples:
+        out["invocation_output_tokens"] = {
+            "samples": len(out_samples),
+            "avg": int(sum(out_samples) / len(out_samples)),
+            "max": max(out_samples),
+        }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 def main():
     ap = argparse.ArgumentParser(description="skill-doctor v1")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -323,6 +400,12 @@ def main():
     p_trig.add_argument("--skill", required=True, help="目标 skill 名")
     p_trig.add_argument("--cases", required=True, help="cases.json 路径")
 
+    p_cost = sub.add_parser("cost", help="成本账单(估算+实测, 不出钱)")
+    p_cost.add_argument("--skill", required=True, help="目标 skill 名")
+    p_cost.add_argument("--platform", default="claude-code",
+                        choices=list(PLATFORM_DIRS) + ["all"])
+    p_cost.add_argument("--days", type=int, default=30)
+
     args = ap.parse_args()
     if args.cmd == "list":
         cmd_list(args)
@@ -332,6 +415,8 @@ def main():
         cmd_lint(args)
     elif args.cmd == "trigger":
         cmd_trigger(args)
+    elif args.cmd == "cost":
+        cmd_cost(args)
 
 
 if __name__ == "__main__":
