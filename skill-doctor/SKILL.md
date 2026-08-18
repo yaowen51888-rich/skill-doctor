@@ -25,7 +25,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 |---|---|---|
 | L1 静态 lint | `doctor.py lint`（机械部分）+ R2/R3 模型判断 | ✅ |
 | L3 历史触发审计 | `doctor.py usage`（仅 claude-code） | ✅ cc / ⬜ 其余平台 |
-| L2 回放触发测试 | headless 跑模拟任务 | ⬜ v2 |
+| L2 回放触发测试 | `doctor.py trigger`（仅 claude-code，花真钱） | ✅ cc / ⬜ 其余平台 |
 | 成本账单 | token 归因 | ⬜ v2 |
 
 ## 工作流
@@ -37,7 +37,18 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 3. **语义复核**（模型做）：对 flagged 项逐个判断——R2 粗检漏掉的"何时用"语义、
    R3 触发词是否覆盖用户原话、R4 竞争对是真竞争还是误报
 4. **历史审计**（仅 cc）：`doctor.py usage --skill <名> --days 30`
-5. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
+5. **触发测试**（仅 cc，可选，每次 case = 1 次真实模型调用）：
+   你先起草 cases——应触发 5~8 条（覆盖用户不同说法）+ 不应触发 3~5 条（近似场景），
+   写入临时 json 后跑：
+   ```json
+   [{"prompt": "帮我体检 aihot skill", "expect": true},
+    {"prompt": "用 python 写个快排", "expect": false}]
+   ```
+   ```bash
+   python <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json>
+   ```
+   输出 trigger_rate / false_trigger_rate / 逐 case 明细
+6. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
 
 ## Lint 规则一览
 
@@ -61,7 +72,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 
 ## 路线图（勿提前实现）
 
-- v2：L2 回放触发测试（`claude -p` / `codex exec` / dsh fork 跑模拟任务集）、成本账单
+- v2 剩余：成本账单（token 归因）；L2/L3 扩展到 codex / dsh / openclaw / hermes
 - v3：OpenClaw 可见性审计、Hermes 漂移检测脚本化
 
 平台路径/日志格式/adapter 约定见 [PLATFORMS.md](PLATFORMS.md)。

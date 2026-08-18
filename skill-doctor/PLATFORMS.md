@@ -7,7 +7,7 @@ skill-doctor 的跨平台策略：**平台无关内核（lint 规则/报告）+ 
 
 | 平台 | skill 目录 | 项目级目录 | 会话日志 | headless | 现状 |
 |---|---|---|---|---|---|
-| claude-code | `~/.claude/skills/` | `./.claude/skills/` | `~/.claude/projects/**/*.jsonl`（转录含 tool_use+usage） | `claude -p` | list ✅ usage ✅ |
+| claude-code | `~/.claude/skills/` | `./.claude/skills/` | `~/.claude/projects/**/*.jsonl`（转录含 tool_use+usage） | `claude -p` | list ✅ usage ✅ trigger ✅ |
 | codex | `~/.codex/skills/` | `./.codex/skills/` | `~/.codex/sessions/` rollout jsonl | `codex exec` | list ✅ usage ⬜ |
 | dsh | — | `./.agents/skills/` | JSONL + SQLite（`ctx.sessionQuery`，最干净） | CLI headless + **fork** | list ✅ usage ⬜ |
 | openclaw | `~/.openclaw/workspace/skills/` | — | `.openclaw/agents/*/sessions/` | 常驻 agent 消息接口 | list ✅ usage ⬜ |
@@ -39,11 +39,12 @@ SkillEvent { platform, session_id, ts, kind: invoke|inject, skill, usage? }
 **纪律**：日志格式无稳定性承诺。reader 必须：格式探测 + 解析失败降级（跳过行不崩）
 + 样本文件锁进测试。
 
-### 3. HeadlessRunner（v2 实现，两个实现族）
+### 3. HeadlessRunner（cc 进程族已实现：`run_claude_headless`）
 
 职责：`sendAndCollect(prompt, {skills: [on/off 列表]}) → 事件流`
 
-- 进程族：`claude -p --output-format json` / `codex exec` / dsh CLI（一次性会话）
+- 进程族：`claude -p --output-format stream-json --max-turns N` ✅（doctor.py trigger）
+  / `codex exec` ⬜ / dsh CLI ⬜（一次性会话）
 - 常驻族：OpenClaw / Hermes 向运行中 agent 发消息。
   **测试必须用独立 agent 实例**，防止测试消息污染生产 agent 的记忆（Hermes 有
   memories/cron，OpenClaw 用 agents.entries 开测试实例）

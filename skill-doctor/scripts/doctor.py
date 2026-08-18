@@ -6,6 +6,7 @@
          格式同为 SKILL.md)
   usage  扫 Claude Code 会话日志, 统计 Skill 工具调用(v1 仅 claude-code 实现, 其余平台见 PLATFORMS.md)
   lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
+  trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
 
 用法:
   python doctor.py list [--platform claude-code]
@@ -238,6 +239,69 @@ def cmd_lint(args):
     }, ensure_ascii=False, indent=2))
 
 
+def is_target_skill(called, target):
+    """plugin skill 名形如 plugin:name, 取尾段比对。"""
+    return called == target or called.split(":")[-1] == target
+
+
+def run_claude_headless(prompt, max_turns=2, timeout=180):
+    """跑一次性 claude 会话, 返回 stream-json 文本。找不到 CLI 或超时返回 ""。"""
+    import shutil
+    import subprocess
+    exe = shutil.which("claude") or shutil.which("claude.cmd") or shutil.which("claude.exe")
+    if not exe:
+        return ""
+    try:
+        p = subprocess.run(
+            [exe, "-p", prompt, "--output-format", "stream-json", "--verbose",
+             "--max-turns", str(max_turns)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout)
+        return p.stdout or ""
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def cmd_trigger(args):
+    cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+    print(f"# 将执行 {len(cases)} 次 claude -p 真实模型调用(花钱), 目标 skill: {args.skill}",
+          file=sys.stderr)
+    results = []
+    for c in cases:
+        stream = run_claude_headless(c["prompt"])
+        called = []
+        for line in stream.splitlines():
+            called += extract_skill_calls(line)
+        hit = any(is_target_skill(n, args.skill) for n in called)
+        expect = bool(c.get("expect", True))
+        if expect and hit:
+            verdict = "pass"
+        elif expect and not hit:
+            verdict = "miss"
+        elif not expect and hit:
+            verdict = "false_trigger"
+        else:
+            verdict = "pass_avoided"
+        results.append({
+            "prompt": c["prompt"][:80],
+            "expect": expect,
+            "skills_called": called,
+            "verdict": verdict,
+        })
+    should = [r for r in results if r["expect"]]
+    shouldnt = [r for r in results if not r["expect"]]
+    hits = sum(1 for r in should if r["verdict"] == "pass")
+    falses = sum(1 for r in shouldnt if r["verdict"] == "false_trigger")
+    print(json.dumps({
+        "platform": "claude-code",
+        "skill": args.skill,
+        "cases": len(results),
+        "trigger_rate": round(hits / len(should), 3) if should else None,
+        "false_trigger_rate": round(falses / len(shouldnt), 3) if shouldnt else None,
+        "results": results,
+    }, ensure_ascii=False, indent=2))
+
+
 def main():
     ap = argparse.ArgumentParser(description="skill-doctor v1")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -255,6 +319,10 @@ def main():
                         choices=list(PLATFORM_DIRS) + ["all"])
     p_lint.add_argument("--skill", default=None, help="只体检匹配名称的 skill")
 
+    p_trig = sub.add_parser("trigger", help="回放触发测试(跑 claude -p, 花真钱)")
+    p_trig.add_argument("--skill", required=True, help="目标 skill 名")
+    p_trig.add_argument("--cases", required=True, help="cases.json 路径")
+
     args = ap.parse_args()
     if args.cmd == "list":
         cmd_list(args)
@@ -262,6 +330,8 @@ def main():
         cmd_usage(args)
     elif args.cmd == "lint":
         cmd_lint(args)
+    elif args.cmd == "trigger":
+        cmd_trigger(args)
 
 
 if __name__ == "__main__":
