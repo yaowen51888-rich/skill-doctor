@@ -3,8 +3,9 @@
 
 子命令:
   list   枚举已装 skill + 解析 frontmatter(claude-code/codex/dsh/openclaw/hermes 目录探测,
-         其中 claude-code、codex、dsh、openclaw、hermes 均为目录扫描, 格式同为 SKILL.md)
+         格式同为 SKILL.md)
   usage  扫 Claude Code 会话日志, 统计 Skill 工具调用(v1 仅 claude-code 实现, 其余平台见 PLATFORMS.md)
+  lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
 
 用法:
   python doctor.py list [--platform claude-code]
@@ -156,6 +157,87 @@ def cmd_usage(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+# 中文高频虚词 bigram, 重叠率计算时剔除(否则人人都含"使用/可以", 竞争虚高)
+STOP_BIGRAMS = {
+    "使用", "可以", "一个", "用户", "当用", "用户", "这个", "什么", "如何", "以及",
+    "用于", "包括", "或者", "如果", "需要", "时候", "情况", "以下", "上述", "所有",
+    "任何", "生成", "处理", "进行", "支持", "提供", "创建", "分析",
+}
+
+# R2 场景信号(粗检): description 里应出现"何时用"类语言
+SCENE_SIGNAL = re.compile(r'使用|当.{0,12}时|适用|场景|触发|Use when|when user|when to', re.I)
+
+
+def tokens(text):
+    """英文小写词 + 中文 bigram 集合, 用于重叠率粗算。"""
+    words = set(re.findall(r'[a-z0-9][a-z0-9_]{2,}', text.lower()))
+    han = re.findall(r'[一-鿿]', text)
+    bigrams = {han[i] + han[i + 1] for i in range(len(han) - 1)}
+    return (words | bigrams) - STOP_BIGRAMS
+
+
+def overlap_rate(a, b):
+    ta, tb = tokens(a), tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return round(len(ta & tb) / min(len(ta), len(tb)), 3)
+
+
+def lint_one(skill, all_skills):
+    """对单个 skill 做机械检查, 返回 verdict 供模型渲染报告。"""
+    desc = skill.get("description", "")
+    n = skill.get("name", "")
+    r = {"skill": n, "dir": skill.get("dir", "")}
+
+    # R1 长度
+    ln = len(desc)
+    r["R1_len"] = ln
+    r["R1"] = "ok" if 50 <= ln <= 500 else ("short" if ln < 50 else "over")
+
+    # R2 场景信号粗检(语义强弱仍需模型判断)
+    r["R2_scene_signal"] = bool(SCENE_SIGNAL.search(desc))
+
+    # R4 竞争: 与其他 skill 的 description 重叠率
+    comps = []
+    for other in all_skills:
+        if other is skill:
+            continue
+        ov = overlap_rate(desc, other.get("description", ""))
+        if ov > 0.4:
+            comps.append({"skill": other.get("name", ""), "overlap": ov})
+    comps.sort(key=lambda x: -x["overlap"])
+    r["R4_competitors"] = comps[:5]
+
+    # R5 name 规范
+    dir_name = Path(skill.get("dir", "")).name
+    kebab = bool(re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', n))
+    r["R5"] = "ok" if (kebab and n == dir_name) else (
+        "not_kebab" if not kebab else "mismatch_dir")
+
+    # 已知局限提示: 多行 YAML 折叠被截断
+    if desc[:1] in (">", "|"):
+        r["yaml_multiline_truncated"] = True
+    return r
+
+
+def cmd_lint(args):
+    skills, _ = scan_skills(args.platform)
+    if args.skill:
+        targets = [s for s in skills if args.skill.lower() in s.get("name", "").lower()]
+    else:
+        targets = skills
+    results = [lint_one(s, skills) for s in targets if "error" not in s]
+    flagged = [r for r in results if r["R1"] != "ok" or r["R4_competitors"]
+               or r["R5"] != "ok" or not r["R2_scene_signal"]
+               or r.get("yaml_multiline_truncated")]
+    print(json.dumps({
+        "platform": args.platform,
+        "checked": len(results),
+        "flagged": len(flagged),
+        "results": results,
+    }, ensure_ascii=False, indent=2))
+
+
 def main():
     ap = argparse.ArgumentParser(description="skill-doctor v1")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -168,11 +250,18 @@ def main():
     p_usage.add_argument("--skill", default=None, help="按名称过滤")
     p_usage.add_argument("--days", type=int, default=30)
 
+    p_lint = sub.add_parser("lint", help="机械体检 R1/R2粗检/R4/R5")
+    p_lint.add_argument("--platform", default="claude-code",
+                        choices=list(PLATFORM_DIRS) + ["all"])
+    p_lint.add_argument("--skill", default=None, help="只体检匹配名称的 skill")
+
     args = ap.parse_args()
     if args.cmd == "list":
         cmd_list(args)
     elif args.cmd == "usage":
         cmd_usage(args)
+    elif args.cmd == "lint":
+        cmd_lint(args)
 
 
 if __name__ == "__main__":
