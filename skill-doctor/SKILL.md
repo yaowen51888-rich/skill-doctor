@@ -27,6 +27,8 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 | L3 历史触发审计 | `doctor.py usage`（仅 claude-code） | ✅ cc / ⬜ 其余平台 |
 | L2 回放触发测试 | `doctor.py trigger`（仅 claude-code，花真钱） | ✅ cc / ⬜ 其余平台 |
 | 成本账单 | `doctor.py cost`（估算+实测，不出钱） | ✅ cc / ⬜ 其余平台 |
+| 漂移检测 | `doctor.py drift`（快照 diff，平台无关） | ✅ |
+| 可见性审计 | `doctor.py visibility`（OpenClaw） | ✅ |
 
 ## 工作流
 
@@ -51,7 +53,15 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 6. **成本账单**（仅 cc，可选）：`doctor.py cost --skill <名> [--days 30]`
    输出 description/body token 估算 + 调用轮 output_tokens 实测。
    渲染报告时必须带上"估算口径、不折算金额"的说明
-7. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
+7. **漂移检测**（任何平台）：`doctor.py drift [--platform X] [--skill <名>]`
+   首跑建基线，之后每次跑 diff 出增删改文件；变更后自动以新版本为基线。
+   快照存 `~/.skill-doctor/snapshots/`，`--reset` 重建。适合 Hermes 自改 skill
+   或多人共享 skill 目录的变更审计
+8. **可见性审计**（OpenClaw）：`doctor.py visibility [--skill <名>]`
+   读 `openclaw.json` 报告每个 skill 的 global / default_agent / 具名 agent 三层可见性。
+   触发失败时先查这个——配置里被 disable 的 skill description 写再好也不会触发。
+   `null` = 配置未提及（通常即默认可见），`false` = 显式禁用
+9. **出报告**：套 REFERENCE.md 模板。建议必须具体到可直接执行的改法，禁止空话
 
 ## Lint 规则一览
 
@@ -75,7 +85,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 
 ## 路线图（勿提前实现）
 
-- v2 已全部落地（cc 平台）；扩展 trigger/usage/cost 到 codex / dsh / openclaw / hermes
-- v3：OpenClaw 可见性审计、Hermes 漂移检测脚本化、dsh fork 中段重放
+- v2/v3 已落地（cc + 平台无关项）；扩展 trigger/usage/cost 到 codex / dsh / openclaw / hermes
+- dsh fork 中段重放（需装 dsh 环境后再做，设计见 PLATFORMS.md）
 
 平台路径/日志格式/adapter 约定见 [PLATFORMS.md](PLATFORMS.md)。

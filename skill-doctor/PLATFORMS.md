@@ -7,11 +7,13 @@ skill-doctor 的跨平台策略：**平台无关内核（lint 规则/报告）+ 
 
 | 平台 | skill 目录 | 项目级目录 | 会话日志 | headless | 现状 |
 |---|---|---|---|---|---|
-| claude-code | `~/.claude/skills/` | `./.claude/skills/` | `~/.claude/projects/**/*.jsonl`（转录含 tool_use+usage） | `claude -p` | list ✅ usage ✅ trigger ✅ |
+| claude-code | `~/.claude/skills/` | `./.claude/skills/` | `~/.claude/projects/**/*.jsonl`（转录含 tool_use+usage） | `claude -p` | list ✅ usage ✅ trigger ✅ cost ✅ |
 | codex | `~/.codex/skills/` | `./.codex/skills/` | `~/.codex/sessions/` rollout jsonl | `codex exec` | list ✅ usage ⬜ |
 | dsh | — | `./.agents/skills/` | JSONL + SQLite（`ctx.sessionQuery`，最干净） | CLI headless + **fork** | list ✅ usage ⬜ |
-| openclaw | `~/.openclaw/workspace/skills/` | — | `.openclaw/agents/*/sessions/` | 常驻 agent 消息接口 | list ✅ usage ⬜ |
+| openclaw | `~/.openclaw/workspace/skills/` | — | `.openclaw/agents/*/sessions/` | 常驻 agent 消息接口 | list ✅ usage ⬜ visibility ✅ |
 | hermes | `./skills/`（仓库根） | — | `~/.hermes`（sessions/memories/logs/cron） | 常驻 agent 消息接口 | list ✅ usage ⬜ |
+
+drift（漂移检测）平台无关：全平台 ✅，快照存 `~/.skill-doctor/snapshots/<platform>/`。
 
 `list ✅` = 目录扫描 + frontmatter 解析（五家 SKILL.md 格式同源，一套解析通吃）。
 `usage ⬜` = 日志 reader 未实现。

@@ -8,6 +8,8 @@
   lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
   trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
   cost   成本账单: desc/body token 估算 + 调用轮 output_tokens 实测(不出钱, 仅 claude-code)
+  drift  漂移检测: 对 skill 目录做内容快照, 对比上次快照报告增删改(平台无关, Hermes 自改场景主用)
+  visibility 可见性审计: 读 openclaw.json, 报告 skill 对哪些 agent 可见(默认 OpenClaw)
 
 用法:
   python doctor.py list [--platform claude-code]
@@ -379,6 +381,114 @@ def cmd_cost(args):
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
+SNAPSHOT_ROOT = Path.home() / ".skill-doctor" / "snapshots"
+
+
+def snapshot_skill(skill_dir):
+    """{相对路径: sha256} — skill 目录全文件指纹。"""
+    import hashlib
+    snap = {}
+    for f in sorted(Path(skill_dir).rglob("*")):
+        if f.is_file():
+            rel = f.relative_to(skill_dir).as_posix()
+            snap[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return snap
+
+
+def cmd_drift(args):
+    skills, _ = scan_skills(args.platform)
+    if args.skill:
+        skills = [s for s in skills if args.skill.lower() in s.get("name", "").lower()]
+    store = SNAPSHOT_ROOT / args.platform
+    store.mkdir(parents=True, exist_ok=True)
+    results = []
+    for s in skills:
+        if "error" in s or "dir" not in s:
+            continue
+        name = s.get("name", Path(s["dir"]).name)
+        snap_file = store / f"{name}.json"
+        current = snapshot_skill(s["dir"])
+        if args.reset or not snap_file.exists():
+            snap_file.write_text(json.dumps(
+                {"taken_at": datetime.now(timezone.utc).isoformat(), "files": current},
+                ensure_ascii=False), encoding="utf-8")
+            results.append({"skill": name, "status": "baseline_created",
+                            "files": len(current)})
+            continue
+        old = json.loads(snap_file.read_text(encoding="utf-8"))
+        old_files = old.get("files", {})
+        changed = sorted(k for k in current if old_files.get(k) != current[k])
+        removed = sorted(k for k in old_files if k not in current)
+        status = "changed" if (changed or removed) else "clean"
+        results.append({"skill": name, "status": status,
+                        "changed": changed, "removed": removed,
+                        "last_snapshot": old.get("taken_at")})
+        if status == "changed":  # 更新快照, 下次以新版本为基线
+            snap_file.write_text(json.dumps(
+                {"taken_at": datetime.now(timezone.utc).isoformat(), "files": current},
+                ensure_ascii=False), encoding="utf-8")
+    print(json.dumps({"platform": args.platform, "results": results},
+                     ensure_ascii=False, indent=2))
+
+
+def cmd_visibility(args):
+    config_path = Path(args.config)
+    if not config_path.is_file():
+        print(json.dumps({"error": f"config not found: {config_path}",
+                          "hint": "OpenClaw 未安装或配置在别处, 可用 --config 指定"},
+                         ensure_ascii=False, indent=2))
+        return
+    cfg = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
+    skills_dir = Path(args.skills_dir)
+    installed = sorted(p.parent.name for p in skills_dir.glob("*/SKILL.md")) \
+        if skills_dir.is_dir() else []
+
+    # ponytail: 只认文档确认的三处: 顶层 skills / agents.defaults.skills / agents.entries.*.skills
+    top = cfg.get("skills", {}) or {}
+    defaults = ((cfg.get("agents") or {}).get("defaults") or {}).get("skills", {}) or {}
+    entries = (cfg.get("agents") or {}).get("entries") or {}
+
+    def visible_in(block, name):
+        """返回 True/False(显式配置) / None(未提及)。兼容 list 与 {enable/disable} 形态。"""
+        if isinstance(block, list):
+            return name in block or None
+        if isinstance(block, dict):
+            for key, val in block.items():
+                if name == key or (isinstance(val, dict) and name in val):
+                    return bool(val is True or (isinstance(val, dict) and val.get("enabled", True)))
+            # enable/disable 列表形态
+            if isinstance(block.get("enable"), list) or isinstance(block.get("disable"), list):
+                en = name in (block.get("enable") or [])
+                dis = name in (block.get("disable") or [])
+                if en or dis:
+                    return en and not dis
+        return None
+
+    results = []
+    for name in installed:
+        global_vis = visible_in(top, name) if isinstance(top, (list, dict)) else None
+        default_vis = visible_in(defaults, name)
+        per_agent = {}
+        for agent_id, agent_cfg in entries.items():
+            if isinstance(agent_cfg, dict):
+                v = visible_in(agent_cfg.get("skills", {}) or {}, name)
+                if v is not None:
+                    per_agent[agent_id] = v
+        results.append({
+            "skill": name,
+            "global": global_vis,                  # 顶层 skills 配置
+            "default_agent": default_vis,          # True/False/None=未提及(通常=可见)
+            "explicit_agents": per_agent,           # 显式配置过的具名 agent
+            "configured": global_vis is not None or default_vis is not None
+                          or bool(per_agent),
+        })
+    if args.skill:
+        results = [r for r in results if args.skill.lower() in r["skill"].lower()]
+    print(json.dumps({
+        "config": str(config_path), "installed": len(installed), "results": results,
+    }, ensure_ascii=False, indent=2))
+
+
 def main():
     ap = argparse.ArgumentParser(description="skill-doctor v1")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -406,6 +516,20 @@ def main():
                         choices=list(PLATFORM_DIRS) + ["all"])
     p_cost.add_argument("--days", type=int, default=30)
 
+    p_drift = sub.add_parser("drift", help="skill 目录漂移检测(快照 diff)")
+    p_drift.add_argument("--platform", default="claude-code",
+                         choices=list(PLATFORM_DIRS) + ["all"])
+    p_drift.add_argument("--skill", default=None, help="只检测匹配名称的 skill")
+    p_drift.add_argument("--reset", action="store_true",
+                         help="丢弃旧快照重建基线")
+
+    p_vis = sub.add_parser("visibility", help="OpenClaw 可见性审计")
+    p_vis.add_argument("--config",
+                       default=str(Path.home() / ".openclaw" / "openclaw.json"))
+    p_vis.add_argument("--skills-dir",
+                       default=str(Path.home() / ".openclaw" / "workspace" / "skills"))
+    p_vis.add_argument("--skill", default=None, help="只看匹配名称的 skill")
+
     args = ap.parse_args()
     if args.cmd == "list":
         cmd_list(args)
@@ -417,6 +541,10 @@ def main():
         cmd_trigger(args)
     elif args.cmd == "cost":
         cmd_cost(args)
+    elif args.cmd == "drift":
+        cmd_drift(args)
+    elif args.cmd == "visibility":
+        cmd_visibility(args)
 
 
 if __name__ == "__main__":
