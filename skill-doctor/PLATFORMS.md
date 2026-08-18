@@ -8,8 +8,8 @@ skill-doctor 的跨平台策略：**平台无关内核（lint 规则/报告）+ 
 | 平台 | skill 目录 | 项目级目录 | 会话日志 | headless | 现状 |
 |---|---|---|---|---|---|
 | claude-code | `~/.claude/skills/` | `./.claude/skills/` | `~/.claude/projects/**/*.jsonl`（转录含 tool_use+usage） | `claude -p` | list ✅ usage ✅ trigger ✅ cost ✅ |
-| codex | `~/.codex/skills/` | `./.codex/skills/` | `~/.codex/sessions/` rollout jsonl | `codex exec` | list ✅ usage ⬜ |
-| dsh | — | `./.agents/skills/` | JSONL + SQLite（`ctx.sessionQuery`，最干净） | CLI headless + **fork** | list ✅ usage ⬜ |
+| codex | `~/.codex/skills/` | `./.codex/skills/` | `~/.codex/sessions/` rollout jsonl | `codex exec` | list ✅ usage ✅(fixture) |
+| dsh | — | `./.agents/skills/` | JSONL + SQLite（`ctx.sessionQuery`，最干净） | CLI headless + **fork** | list ✅ usage⬜(extract 已支持, 路径待真机) |
 | openclaw | `~/.openclaw/workspace/skills/` | — | `.openclaw/agents/*/sessions/` | 常驻 agent 消息接口 | list ✅ usage ⬜ visibility ✅ |
 | hermes | `./skills/`（仓库根） | — | `~/.hermes`（sessions/memories/logs/cron） | 常驻 agent 消息接口 | list ✅ usage ⬜ |
 
@@ -39,7 +39,9 @@ SkillEvent { platform, session_id, ts, kind: invoke|inject, skill, usage? }
   dsh 走 `ctx.sessionQuery`（最干净，优先做）/ OpenClaw sessions / Hermes `~/.hermes`
 
 **纪律**：日志格式无稳定性承诺。reader 必须：格式探测 + 解析失败降级（跳过行不崩）
-+ 样本文件锁进测试。
++ 样本文件锁进测试（`test_doctor.py` 已锁三平台提取形态：cc tool_use /
+dsh 事件信封 / codex arguments 字符串；dsh/codex 为文档推断形态，
+真机首跑若提取失败优先改 fixture 再改提取器）。
 
 ### 3. HeadlessRunner（cc 进程族已实现：`run_claude_headless`）
 

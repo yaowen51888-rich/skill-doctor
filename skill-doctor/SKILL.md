@@ -24,7 +24,7 @@ python <本skill目录>/scripts/doctor.py usage --skill aihot --days 30
 | 功能 | 命令 | 状态 |
 |---|---|---|
 | L1 静态 lint | `doctor.py lint`（机械部分）+ R2/R3 模型判断 | ✅ |
-| L3 历史触发审计 | `doctor.py usage`（仅 claude-code） | ✅ cc / ⬜ 其余平台 |
+| L3 历史触发审计 | `doctor.py usage`（`--platform claude-code/codex`） | ✅ cc+codex / ⬜ 其余 |
 | L2 回放触发测试 | `doctor.py trigger`（仅 claude-code，花真钱） | ✅ cc / ⬜ 其余平台 |
 | 成本账单 | `doctor.py cost`（估算+实测，不出钱） | ✅ cc / ⬜ 其余平台 |
 | 漂移检测 | `doctor.py drift`（快照 diff，平台无关） | ✅ |

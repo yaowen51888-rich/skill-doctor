@@ -4,7 +4,8 @@
 子命令:
   list   枚举已装 skill + 解析 frontmatter(claude-code/codex/dsh/openclaw/hermes 目录探测,
          格式同为 SKILL.md)
-  usage  扫 Claude Code 会话日志, 统计 Skill 工具调用(v1 仅 claude-code 实现, 其余平台见 PLATFORMS.md)
+  usage  扫会话日志统计 skill 工具调用(claude-code/codex 有日志路径; dsh/openclaw/hermes
+         提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
   lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
   trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
   cost   成本账单: desc/body token 估算 + 调用轮 output_tokens 实测(不出钱, 仅 claude-code)
@@ -86,13 +87,23 @@ def cmd_list(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def iter_cc_logs(days):
-    """产出 ~/.claude/projects 下 N 天内修改过的 jsonl 文件。"""
-    root = Path.home() / ".claude" / "projects"
-    if not root.is_dir():
+# 各平台会话日志根目录(None=路径未确认, 只支持提取逻辑不支持扫描)
+SESSION_LOG_DIRS = {
+    "claude-code": Path.home() / ".claude" / "projects",
+    "codex": Path.home() / ".codex" / "sessions",
+    "dsh": None,        # 事件格式已知(seq/time/data 信封), 落盘路径待真机确认
+    "openclaw": None,   # .openclaw/agents/*/sessions, 结构细节未验证
+    "hermes": None,     # ~/.hermes, 结构细节未验证
+}
+
+
+def iter_logs(platform, days):
+    """产出某平台日志根下 N 天内修改过的 jsonl 文件。"""
+    root = SESSION_LOG_DIRS.get(platform)
+    if root is None or not Path(root).is_dir():
         return
     cutoff = datetime.now().timestamp() - days * 86400
-    for f in root.rglob("*.jsonl"):
+    for f in Path(root).rglob("*.jsonl"):
         try:
             if f.stat().st_mtime >= cutoff:
                 yield f
@@ -100,39 +111,53 @@ def iter_cc_logs(days):
             continue
 
 
-def extract_skill_calls(line_text):
-    """从一行转录 JSON 提取 Skill 工具调用名。找不到返回空列表。
+def _walk_skill_calls(node):
+    """深度优先找"工具名为 skill"的调用节点, 产出被调用的 skill 名。
 
-    兼容: content 为数组, 元素 type==tool_use 且 name 含 Skill;
-    参数名可能是 skill / skill_name / name, 取第一个字符串值。
+    覆盖三家同构形态: cc tool_use 块 / dsh 事件 data / codex function_call。
     """
-    calls = []
+    if isinstance(node, dict):
+        name = node.get("name")
+        if isinstance(name, str) and name.strip().lower() in ("skill", "skills"):
+            args = node.get("input") or node.get("arguments") \
+                or node.get("parameters") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            if isinstance(args, dict):
+                for key in ("skill", "skill_name", "name", "command"):
+                    v = args.get(key)
+                    if isinstance(v, str) and v:
+                        yield v.lstrip("/").split()[0]
+                        return
+                for v in args.values():  # 无明确字段名, 取第一个字符串值
+                    if isinstance(v, str) and v:
+                        yield v.split()[0]
+                        return
+            return  # 命中工具节点后不再深挖该子树
+        for v in node.values():
+            yield from _walk_skill_calls(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_skill_calls(v)
+
+
+def extract_skill_calls(line_text):
+    """从一行日志 JSON 提取 skill 工具调用名。找不到返回空列表。"""
     try:
         obj = json.loads(line_text)
     except (json.JSONDecodeError, ValueError):
-        return calls
-    msg = obj.get("message") or obj
-    content = msg.get("content") if isinstance(msg, dict) else None
-    if not isinstance(content, list):
-        return calls
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "tool_use" and "Skill" in str(block.get("name", "")):
-            inp = block.get("input") or {}
-            for key in ("skill", "skill_name", "name", "command"):
-                v = inp.get(key)
-                if isinstance(v, str) and v:
-                    calls.append(v.lstrip("/").split()[0] if v.startswith("/") else v)
-                    break
-    return calls
+        return []
+    return list(_walk_skill_calls(obj))
 
 
 def cmd_usage(args):
     counter = Counter()
     sessions = {}
     total_lines = 0
-    for f in iter_cc_logs(args.days):
+    for f in iter_logs(args.platform, args.days):
         used_here = set()
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
@@ -148,7 +173,7 @@ def cmd_usage(args):
             sessions[n] = sessions.get(n, 0) + 1
 
     result = {
-        "platform": "claude-code",
+        "platform": args.platform,
         "window_days": args.days,
         "files_scanned_hint_lines": total_lines,
         "skill_calls": [
@@ -357,9 +382,10 @@ def cmd_cost(args):
         out["hint"] = "skill 目录不在当前扫描范围(可能装在别的项目), 仅输出调用统计"
 
     # 历史调用 + 调用轮 output_tokens 实测
+    log_platform = args.platform if args.platform != "all" else "claude-code"
     counter = Counter()
     out_samples = []
-    for f in iter_cc_logs(args.days):
+    for f in iter_logs(log_platform, args.days):
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
                 if '"Skill"' not in line and '"skill"' not in line:
@@ -497,7 +523,9 @@ def main():
     p_list.add_argument("--platform", default="claude-code",
                         choices=list(PLATFORM_DIRS) + ["all"])
 
-    p_usage = sub.add_parser("usage", help="统计 Skill 工具调用(仅 claude-code)")
+    p_usage = sub.add_parser("usage", help="统计 skill 工具调用(claude-code/codex)")
+    p_usage.add_argument("--platform", default="claude-code",
+                         choices=[p for p in SESSION_LOG_DIRS if SESSION_LOG_DIRS[p]])
     p_usage.add_argument("--skill", default=None, help="按名称过滤")
     p_usage.add_argument("--days", type=int, default=30)
 
