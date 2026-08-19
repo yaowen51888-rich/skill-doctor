@@ -4,10 +4,13 @@
 子命令:
   list   枚举已装 skill + 解析 frontmatter(claude-code/codex/dsh/openclaw/hermes 目录探测,
          格式同为 SKILL.md)
-  usage  扫会话日志统计 skill 工具调用(claude-code/codex 有日志路径; dsh/openclaw/hermes
+  usage  扫会话日志统计 skill 调用: Skill 工具 + 斜杠直展 command-name 形态,
+         trigger 测试会话已剔除(claude-code/codex 有日志路径; dsh/openclaw/hermes
          提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
   lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
   trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
+  cases  从 usage 历史真实会话采样生成 trigger 测试集(正例=调过目标 skill 的会话
+         首条 prompt, 反例=调了其他 skill 的会话 prompt, 数据驱动非编造)
   cost   成本账单: desc/body token 估算 + 调用轮 output_tokens 实测(不出钱, 仅 claude-code)
   drift  漂移检测: 对 skill 目录做内容快照, 对比上次快照报告增删改(平台无关, Hermes 自改场景主用)
   visibility 可见性审计: 读 openclaw.json, 报告 skill 对哪些 agent 可见(默认 OpenClaw)
@@ -43,15 +46,34 @@ PROJECT_DIRS = {
 
 
 def parse_frontmatter(text):
-    """简易 frontmatter 解析, 只取 name/description, 不引 yaml 依赖。"""
+    """简易 frontmatter 解析, 只取 name/description, 不引 yaml 依赖。
+
+    支持多行折叠: description: >- / | 后吃连续缩进行, > 折叠为空格连接, | 保留换行。
+    """
     m = re.match(r"^---\s*\n(.*?)\n---", text, re.S)
     out = {}
     if not m:
         return out
-    for line in m.group(1).splitlines():
-        kv = re.match(r'^(name|description):\s*(.+)$', line.strip())
-        if kv:
-            out[kv.group(1)] = kv.group(2).strip().strip('"').strip("'")
+    lines = m.group(1).splitlines()
+    i = 0
+    while i < len(lines):
+        kv = re.match(r'^(name|description):\s*(.*)$', lines[i].strip())
+        if not kv:
+            i += 1
+            continue
+        val = kv.group(2).strip()
+        if val and val[0] in ">|" and set(val) <= {">", "|", "-", "+"}:
+            block = []
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][:1].isspace()):
+                block.append(lines[j].strip())
+                j += 1
+            joiner = " " if val[0] == ">" else "\n"
+            val = joiner.join(block).strip()
+            i = j - 1
+        if val:
+            out[kv.group(1)] = val.strip('"').strip("'")
+        i += 1
     return out
 
 
@@ -97,13 +119,34 @@ SESSION_LOG_DIRS = {
 }
 
 
+# trigger 测试会话黑名单: 测试调用不得计入 usage/cost 真实统计
+TRIGGER_BLOCKLIST = Path.home() / ".skill-doctor" / "trigger_sessions.json"
+
+
+def load_trigger_blocklist():
+    try:
+        data = json.loads(TRIGGER_BLOCKLIST.read_text(encoding="utf-8"))
+        return set(data.get("sessions", []))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return set()
+
+
+def save_trigger_blocklist(ids):
+    TRIGGER_BLOCKLIST.parent.mkdir(parents=True, exist_ok=True)
+    TRIGGER_BLOCKLIST.write_text(
+        json.dumps({"sessions": sorted(ids)}, ensure_ascii=False), encoding="utf-8")
+
+
 def iter_logs(platform, days):
-    """产出某平台日志根下 N 天内修改过的 jsonl 文件。"""
+    """产出某平台日志根下 N 天内修改过的 jsonl 文件(剔除 trigger 测试会话)。"""
     root = SESSION_LOG_DIRS.get(platform)
     if root is None or not Path(root).is_dir():
         return
+    blocked = load_trigger_blocklist()
     cutoff = datetime.now().timestamp() - days * 86400
     for f in Path(root).rglob("*.jsonl"):
+        if f.stem in blocked:
+            continue
         try:
             if f.stat().st_mtime >= cutoff:
                 yield f
@@ -153,32 +196,70 @@ def extract_skill_calls(line_text):
     return list(_walk_skill_calls(obj))
 
 
+# 斜杠直展形态: 用户消息内容含 <command-name>/NAME</command-name>, 不走 Skill 工具
+COMMAND_NAME_RE = re.compile(r'<command-name>\s*/?([^\s<]+)')
+
+
+def extract_slash_commands(line_text):
+    """提取斜杠命令名(/NAME 取首词)。是否为 skill 由调用方对已装名单过滤。"""
+    return COMMAND_NAME_RE.findall(line_text)
+
+
+def known_skill_names(platform):
+    """{调用名: 规范名} — 覆盖 plugin:name 全名与尾段两种写法。"""
+    known = {}
+    for s in scan_skills(platform)[0]:
+        n = s.get("name")
+        if n:
+            known[n] = n
+            known[n.split(":")[-1]] = n
+    return known
+
+
+def slash_calls_in_line(line_text, known):
+    """行内斜杠直展调用(映射到已装 skill 规范名), 供 usage/cases 共用。"""
+    out = []
+    if "<command-name>" in line_text:
+        for name in extract_slash_commands(line_text):
+            c = known.get(name)
+            if c:
+                out.append(c)
+    return out
+
+
 def cmd_usage(args):
     counter = Counter()
+    slash_counter = Counter()
     sessions = {}
     total_lines = 0
+    known = known_skill_names(args.platform)
     for f in iter_logs(args.platform, args.days):
         used_here = set()
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
-                if '"Skill"' not in line and '"skill"' not in line:
-                    continue  # 快速预过滤, 跳过无关行
-                total_lines += 1
-                for name in extract_skill_calls(line):
-                    counter[name] += 1
+                if '"Skill"' in line or '"skill"' in line:
+                    total_lines += 1
+                    for name in extract_skill_calls(line):
+                        counter[name] += 1
+                        used_here.add(name)
+                for name in slash_calls_in_line(line, known):
+                    slash_counter[name] += 1
                     used_here.add(name)
         except OSError:
             continue
         for n in used_here:
             sessions[n] = sessions.get(n, 0) + 1
 
+    all_names = set(counter) | set(slash_counter)
     result = {
         "platform": args.platform,
         "window_days": args.days,
         "files_scanned_hint_lines": total_lines,
         "skill_calls": [
-            {"skill": n, "calls": c, "sessions": sessions.get(n, 0)}
-            for n, c in counter.most_common()
+            {"skill": n, "calls": counter.get(n, 0),
+             "slash_calls": slash_counter.get(n, 0),
+             "sessions": sessions.get(n, 0)}
+            for n in sorted(all_names, key=lambda k: -(counter[k] + slash_counter[k]))
         ],
     }
     if args.skill:
@@ -242,10 +323,6 @@ def lint_one(skill, all_skills):
     kebab = bool(re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', n))
     r["R5"] = "ok" if (kebab and n == dir_name) else (
         "not_kebab" if not kebab else "mismatch_dir")
-
-    # 已知局限提示: 多行 YAML 折叠被截断
-    if desc[:1] in (">", "|"):
-        r["yaml_multiline_truncated"] = True
     return r
 
 
@@ -257,8 +334,7 @@ def cmd_lint(args):
         targets = skills
     results = [lint_one(s, skills) for s in targets if "error" not in s]
     flagged = [r for r in results if r["R1"] != "ok" or r["R4_competitors"]
-               or r["R5"] != "ok" or not r["R2_scene_signal"]
-               or r.get("yaml_multiline_truncated")]
+               or r["R5"] != "ok" or not r["R2_scene_signal"]]
     print(json.dumps({
         "platform": args.platform,
         "checked": len(results),
@@ -290,13 +366,133 @@ def run_claude_headless(prompt, max_turns=2, timeout=180):
         return ""
 
 
+def collect_session_ids(stream):
+    """从 stream-json 事件行收集 session_id, 供 usage 黑名单剔除测试会话。"""
+    ids = set()
+    for line in stream.splitlines():
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        sid = ev.get("session_id")
+        if isinstance(sid, str) and sid:
+            ids.add(sid)
+    return ids
+
+
+def first_user_prompt(line_text):
+    """该行若为真实用户文本消息则返回其文本, 否则 None。
+
+    剔除命令直展(<command-name>)/工具结果/系统注入/Caveat 形态。
+    """
+    try:
+        obj = json.loads(line_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or obj.get("type") != "user" or obj.get("isMeta"):
+        return None
+    content = (obj.get("message") or {}).get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = " ".join(p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text")
+    else:
+        return None
+    text = text.strip()
+    if not text or text.startswith("<") or text.startswith("Caveat:"):
+        return None
+    return text
+
+
+def cmd_cases(args):
+    """从 usage 历史采样生成 cases.json(数据驱动测试集)。
+
+    正例: 目标 skill 调用时刻前的最近一条用户消息(真实触发语境;
+          斜杠直展会话无此前消息, 兜底取会话首条)
+    反例: 路由到其他 skill 的会话 prompt, 按 description 重叠度(竞争度)排序,
+          竞品会话优先——反例天然测"抢触发"
+    """
+    skills = scan_skills(args.platform)[0]
+    desc_by_name = {s.get("name", ""): s.get("description", "") for s in skills}
+    target_desc = next((s.get("description", "") for s in skills
+                        if is_target_skill(s.get("name", ""), args.skill)), "")
+    known = known_skill_names(args.platform)
+    boundary = [b.strip() for b in args.boundary.split(",")] if args.boundary else []
+
+    pos, neg = [], []
+    seen = set()
+    for f in iter_logs(args.platform, args.days):
+        called, hit_prompt, first_prompt, last_prompt = [], None, None, None
+        try:
+            for line in f.open(encoding="utf-8", errors="replace"):
+                if '"type":"user"' in line:
+                    p = first_user_prompt(line)
+                    if p:
+                        last_prompt = p
+                        if first_prompt is None:
+                            first_prompt = p
+                if '"Skill"' in line or '"skill"' in line:
+                    called += extract_skill_calls(line)
+                called += slash_calls_in_line(line, known)  # 斜杠直展也算真实调用
+                if hit_prompt is None and any(
+                        is_target_skill(n, args.skill) for n in called):
+                    hit_prompt = last_prompt  # 首次命中前的最近用户消息
+        except OSError:
+            continue
+        prompt = hit_prompt or first_prompt
+        if not prompt or prompt in seen:
+            continue
+        seen.add(prompt)
+        others = [n for n in set(called) if not is_target_skill(n, args.skill)]
+        item = {"prompt": prompt, "source_session": f.stem}
+        if any(is_target_skill(n, args.skill) for n in called):
+            item["expect"] = True
+            pos.append(item)
+        elif others:
+            if boundary and not any(b in prompt for b in boundary):
+                continue
+            item["expect"] = False
+            item["routed_to"] = sorted(set(others))[:3]
+            neg.append(item)
+
+    def rivalry(item):
+        # 反例竞争度: routed skill 与目标的 description 重叠率;
+        # prompt 点名目标 skill(却路由去了别处)= 最强边界测试, 直接加权
+        base = max((overlap_rate(target_desc, desc_by_name.get(r, ""))
+                    for r in item.get("routed_to", [])), default=0.0)
+        if args.skill.lower() in item["prompt"].lower():
+            base += 1.0
+        return base
+
+    pos.sort(key=lambda x: x["source_session"])  # 稳定序, 输出可复现
+    neg.sort(key=lambda x: (-rivalry(x), x["source_session"]))
+    cases = pos[:args.per] + neg[:args.per]
+    out = {
+        "skill": args.skill,
+        "note": "正例=目标调用前最近用户消息(兜底会话首条); "
+                "反例=路由到其他 skill 的 prompt, 按竞争度降序(竞品优先)",
+        "cases": cases,
+    }
+    text = json.dumps(out, ensure_ascii=False, indent=2)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"# wrote {len(cases)} cases to {args.out} "
+              f"(pos={min(len(pos), args.per)}, neg={min(len(neg), args.per)})",
+              file=sys.stderr)
+    else:
+        print(text)
+
+
 def cmd_trigger(args):
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
     print(f"# 将执行 {len(cases)} 次 claude -p 真实模型调用(花钱), 目标 skill: {args.skill}",
           file=sys.stderr)
     results = []
+    test_sessions = set()
     for c in cases:
-        stream = run_claude_headless(c["prompt"])
+        stream = run_claude_headless(c["prompt"], max_turns=args.max_turns)
+        test_sessions |= collect_session_ids(stream)
         called = []
         for line in stream.splitlines():
             called += extract_skill_calls(line)
@@ -320,12 +516,15 @@ def cmd_trigger(args):
     shouldnt = [r for r in results if not r["expect"]]
     hits = sum(1 for r in should if r["verdict"] == "pass")
     falses = sum(1 for r in shouldnt if r["verdict"] == "false_trigger")
+    if test_sessions:  # 测试会话进黑名单, usage/cost 不再计入
+        save_trigger_blocklist(load_trigger_blocklist() | test_sessions)
     print(json.dumps({
         "platform": "claude-code",
         "skill": args.skill,
         "cases": len(results),
         "trigger_rate": round(hits / len(should), 3) if should else None,
         "false_trigger_rate": round(falses / len(shouldnt), 3) if shouldnt else None,
+        "test_sessions_excluded": len(test_sessions),
         "results": results,
     }, ensure_ascii=False, indent=2))
 
@@ -399,10 +598,13 @@ def cmd_cost(args):
             continue
     out["invocations"] = sum(counter.values())
     if out_samples:
+        avg = int(sum(out_samples) / len(out_samples))
         out["invocation_output_tokens"] = {
             "samples": len(out_samples),
-            "avg": int(sum(out_samples) / len(out_samples)),
+            "avg": avg,
             "max": max(out_samples),
+            # 总账: 窗口内全部调用按样本均值折算(实测样本覆盖不足时为估)
+            "total_est": out["invocations"] * avg,
         }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
@@ -537,6 +739,20 @@ def main():
     p_trig = sub.add_parser("trigger", help="回放触发测试(跑 claude -p, 花真钱)")
     p_trig.add_argument("--skill", required=True, help="目标 skill 名")
     p_trig.add_argument("--cases", required=True, help="cases.json 路径")
+    p_trig.add_argument("--max-turns", type=int, default=2,
+                        help="单 case claude 会话轮数上限(默认 2)")
+
+    p_cases = sub.add_parser("cases", help="从 usage 历史采样生成 trigger 测试集")
+    p_cases.add_argument("--skill", required=True, help="目标 skill 名")
+    p_cases.add_argument("--platform", default="claude-code",
+                         choices=[p for p in SESSION_LOG_DIRS if SESSION_LOG_DIRS[p]])
+    p_cases.add_argument("--days", type=int, default=30)
+    p_cases.add_argument("--per", type=int, default=5,
+                         help="正/反例各采 N 条(默认 5)")
+    p_cases.add_argument("--boundary", default=None,
+                         help="逗号分隔边界词, 反例 prompt 须命中其一(如 仓库,RFID)")
+    p_cases.add_argument("--out", default=None,
+                         help="写出 cases.json 路径(缺省打印 stdout)")
 
     p_cost = sub.add_parser("cost", help="成本账单(估算+实测, 不出钱)")
     p_cost.add_argument("--skill", required=True, help="目标 skill 名")
@@ -567,6 +783,8 @@ def main():
         cmd_lint(args)
     elif args.cmd == "trigger":
         cmd_trigger(args)
+    elif args.cmd == "cases":
+        cmd_cases(args)
     elif args.cmd == "cost":
         cmd_cost(args)
     elif args.cmd == "drift":

@@ -32,18 +32,26 @@ description: 体检与优化 AI Agent 的 skill (SKILL.md)，用户的问题分�
 ## 体检域（lint + usage）
 
 ```bash
-python <本skill目录>/scripts/doctor.py lint [--skill <名>]   # 机械检查
-python <本skill目录>/scripts/doctor.py usage --skill <名>    # 历史统计
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py lint [--skill <名>]   # 机械检查
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py usage --skill <名>    # 历史统计
 ```
 
 lint 输出 R1 长度/R2 信号/R4 竞争/R5 name/YAML 截断的 verdict 后，
 **你对 flagged 项做语义复核**：R2 粗检漏掉的"何时用"语义、R3 触发词是否
 覆盖用户原话、R4 竞争对是真竞争还是误报。规则细则见 REFERENCE.md。
 
-## 触发域（trigger）
+## 触发域（trigger + cases）
 
-你先起草 cases——应触发 5~8 条（覆盖用户不同说法）+ 不应触发 3~5 条
-（近似场景），写入临时 json：
+**优先从历史采样**（真实分布，非编造）：
+
+```bash
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py cases --skill <名> [--per 5] [--boundary 边界词1,词2] [--out cases.json]
+```
+
+正例=目标调用前最近用户消息（真实触发语境），反例=路由到其他 skill 的 prompt，
+按竞争度排序（desc 重叠率 + prompt 点名目标加权，竞品/点名场景优先测"抢触发"），
+带 routed_to 溯源。R4 边界词再精筛加 `--boundary`。历史太薄（<3 正例）再手写
+补齐——应触发 5~8 条（不同说法）+ 不应触发 3~5 条（近似场景）：
 
 ```json
 [{"prompt": "帮我体检 aihot skill", "expect": true},
@@ -51,16 +59,16 @@ lint 输出 R1 长度/R2 信号/R4 竞争/R5 name/YAML 截断的 verdict 后，
 ```
 
 ```bash
-python <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json>
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json> [--max-turns N]
 ```
 
 每个 case = 1 次真实模型调用（花钱），跑前告知用户。输出 trigger_rate /
-false_trigger_rate / 逐 case 明细。
+false_trigger_rate / 逐 case 明细；测试会话自动进黑名单不污染 usage。
 
 ## 成本域（cost）
 
 ```bash
-python <本skill目录>/scripts/doctor.py cost --skill <名> [--days 30]
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py cost --skill <名> [--days 30]
 ```
 
 输出 description/body token 估算 + 调用轮 output_tokens 实测。
@@ -69,8 +77,8 @@ python <本skill目录>/scripts/doctor.py cost --skill <名> [--days 30]
 ## 专项（drift / visibility）
 
 ```bash
-python <本skill目录>/scripts/doctor.py drift [--skill <名>] [--reset]
-python <本skill目录>/scripts/doctor.py visibility [--skill <名>]
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py drift [--skill <名>] [--reset]
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py visibility [--skill <名>]
 ```
 
 - drift：首跑建基线，之后 diff 增删改；快照存 `~/.skill-doctor/snapshots/`
@@ -79,11 +87,10 @@ python <本skill目录>/scripts/doctor.py visibility [--skill <名>]
 
 ## 注意
 
-- `doctor.py` frontmatter 解析不认多行 YAML 折叠（`>`/`|-`），此类 skill 的
-  description 显示截断——提醒用户改单行
 - 触发率/统计**禁止跨平台合并口径**，只分平台报告
-- slash command（如 `/aihot` 直展）不走 Skill 工具，不计入 usage——报告时
-  向用户说明统计口径
+- usage 统计口径：`calls`=Skill 工具调用，`slash_calls`=`<command-name>` 斜杠直展，
+  两者都算真实使用；trigger 测试会话（session 黑名单 `~/.skill-doctor/trigger_sessions.json`）
+  自动剔除，不计入
 
 平台路径/日志格式/adapter 施工图见 [PLATFORMS.md](PLATFORMS.md)。
 
