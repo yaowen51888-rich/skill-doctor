@@ -6,3 +6,5 @@ __pycache__/
 .cortex/
 .pi/
 skills-lock.json
+skill-doctor-workspace/
+*.stackdump
