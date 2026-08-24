@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 from doctor import (  # noqa: E402
-    collect_session_ids, est_tokens, extract_skill_calls,
+    case_role, collect_session_ids, est_tokens, extract_skill_calls,
     extract_slash_commands, first_user_prompt, is_target_skill,
     overlap_rate, parse_frontmatter,
 )
@@ -69,8 +69,8 @@ assert is_target_skill("aihot", "aihot")
 assert is_target_skill("superpowers:brainstorming", "brainstorming")
 assert not is_target_skill("skill-doctor", "doctor")  # 尾段精确, 非子串
 
-cjk, other = est_tokens("中文内容"), est_tokens("abcdefgh")  # 4字/1.6≈2, 8/4=2
-assert cjk == 2 and other == 2, f"est_tokens 失准: {cjk},{other}"
+cjk, other = est_tokens("中文内容"), est_tokens("abcdefgh")  # 4/1.1≈3, 8/2.8≈2
+assert cjk == 3 and other == 2, f"est_tokens 失准: {cjk},{other}"
 
 # --- frontmatter 多行折叠 ---
 FOLD = "---\nname: fold-skill\ndescription: >-\n  第一行内容\n  第二行内容\n---\nbody"
@@ -84,5 +84,13 @@ assert parse_frontmatter(QUOTED)["description"] == "单行带引号", "引号剥
 assert overlap_rate("", "x") == 0.0
 hi = overlap_rate("pdf extract tables forms merge", "extract pdf forms tables fill")
 assert hi > 0.5, f"高重叠未检出: {hi}"
+
+# --- cases 采样角色判定: 斜杠直展无 NL 语境, 不作正例 ---
+assert case_role(["skill-doctor"], [], "skill-doctor") == "pos", "工具触发=正例"
+assert case_role(["skill-doctor"], ["skill-doctor"], "skill-doctor") == "pos", "工具+斜杠以工具为准"
+assert case_role([], ["skill-doctor"], "skill-doctor") is None, "仅斜杠=跳过"
+assert case_role([], ["aihot"], "skill-doctor") == "neg", "路由别处=反例"
+assert case_role(["aihot"], [], "skill-doctor") == "neg", "工具路由别处=反例"
+assert case_role([], [], "skill-doctor") is None, "空会话=跳过"
 
 print("ALL PASS")

@@ -258,7 +258,9 @@ def cmd_usage(args):
         "skill_calls": [
             {"skill": n, "calls": counter.get(n, 0),
              "slash_calls": slash_counter.get(n, 0),
-             "sessions": sessions.get(n, 0)}
+             "sessions": sessions.get(n, 0),
+             # 历史计数里目录已删的 skill 标 false, 不静默剔除(历史趋势仍有参考价值)
+             "installed": n in known}
             for n in sorted(all_names, key=lambda k: -(counter[k] + slash_counter[k]))
         ],
     }
@@ -348,19 +350,34 @@ def is_target_skill(called, target):
     return called == target or called.split(":")[-1] == target
 
 
-def run_claude_headless(prompt, max_turns=2, timeout=180):
+def case_role(tool_called, slash_called, target):
+    """会话在测试集里的角色: pos=Skill 工具自动触发(有 NL 语境) /
+    neg=路由到其他 skill / None=跳过(目标仅斜杠直展——用户显式点名,
+    其前最近用户消息与触发无关, 是采样噪声)。"""
+    if any(is_target_skill(n, target) for n in tool_called):
+        return "pos"
+    if any(is_target_skill(n, target) for n in slash_called):
+        return None
+    return "neg" if (set(tool_called) | set(slash_called)) else None
+
+
+def run_claude_headless(prompt, max_turns=2, timeout=180, cwd=None):
     """跑一次性 claude 会话, 返回 stream-json 文本。找不到 CLI 或超时返回 ""。"""
+    import os
     import shutil
     import subprocess
     exe = shutil.which("claude") or shutil.which("claude.cmd") or shutil.which("claude.exe")
     if not exe:
         return ""
+    # 剥 CLAUDECODE: 嵌套守卫只防交互终端冲突, 子进程程序化调用须放行
+    # (本会话内 spawn 的 trigger 测试会因此挂死)
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     try:
         p = subprocess.run(
             [exe, "-p", prompt, "--output-format", "stream-json", "--verbose",
              "--max-turns", str(max_turns)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout)
+            timeout=timeout, env=env, cwd=cwd)
         return p.stdout or ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
@@ -423,7 +440,8 @@ def cmd_cases(args):
     pos, neg = [], []
     seen = set()
     for f in iter_logs(args.platform, args.days):
-        called, hit_prompt, first_prompt, last_prompt = [], None, None, None
+        tool_called, slash_called = [], []
+        hit_prompt, first_prompt, last_prompt = None, None, None
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
                 if '"type":"user"' in line:
@@ -433,10 +451,10 @@ def cmd_cases(args):
                         if first_prompt is None:
                             first_prompt = p
                 if '"Skill"' in line or '"skill"' in line:
-                    called += extract_skill_calls(line)
-                called += slash_calls_in_line(line, known)  # 斜杠直展也算真实调用
+                    tool_called += extract_skill_calls(line)
+                slash_called += slash_calls_in_line(line, known)
                 if hit_prompt is None and any(
-                        is_target_skill(n, args.skill) for n in called):
+                        is_target_skill(n, args.skill) for n in tool_called + slash_called):
                     hit_prompt = last_prompt  # 首次命中前的最近用户消息
         except OSError:
             continue
@@ -444,16 +462,18 @@ def cmd_cases(args):
         if not prompt or prompt in seen:
             continue
         seen.add(prompt)
-        others = [n for n in set(called) if not is_target_skill(n, args.skill)]
+        role = case_role(tool_called, slash_called, args.skill)
+        called = set(tool_called) | set(slash_called)
         item = {"prompt": prompt, "source_session": f.stem}
-        if any(is_target_skill(n, args.skill) for n in called):
+        if role == "pos":
             item["expect"] = True
             pos.append(item)
-        elif others:
+        elif role == "neg":
+            others = sorted(n for n in called if not is_target_skill(n, args.skill))
             if boundary and not any(b in prompt for b in boundary):
                 continue
             item["expect"] = False
-            item["routed_to"] = sorted(set(others))[:3]
+            item["routed_to"] = others[:3]
             neg.append(item)
 
     def rivalry(item):
@@ -490,8 +510,12 @@ def cmd_trigger(args):
           file=sys.stderr)
     results = []
     test_sessions = set()
+    import tempfile
+    # 中性 cwd: 若源 skill 目录在 cwd, 模型会直接 Read 源文件绕过 Skill 工具, 触发测试失真
+    neutral_cwd = tempfile.gettempdir()
     for c in cases:
-        stream = run_claude_headless(c["prompt"], max_turns=args.max_turns)
+        stream = run_claude_headless(c["prompt"], max_turns=args.max_turns,
+                                     cwd=neutral_cwd)
         test_sessions |= collect_session_ids(stream)
         called = []
         for line in stream.splitlines():
@@ -530,9 +554,9 @@ def cmd_trigger(args):
 
 
 def est_tokens(text):
-    """粗估 token: CJK ~1.6 字/token, 其余 ~4 字符/token。估算口径, 勿折算金额。"""
+    """粗估 token: CJK ~1.1 字/token, 其余 ~2.8 字符/token (2026-08 转录实测校准)。估算口径, 勿折算金额。"""
     cjk = len(re.findall(r'[一-鿿]', text))
-    return int(cjk / 1.6 + (len(text) - cjk) / 4)
+    return int(cjk / 1.1 + (len(text) - cjk) / 2.8)
 
 
 def extract_calls_with_usage(line_text):
@@ -718,6 +742,11 @@ def cmd_visibility(args):
 
 
 def main():
+    # Windows 管道下 stdout 默认 cp936, ensure_ascii=False 的中文 JSON 全乱码;
+    # 3.7+ 可 reconfigure, 更老版本静默维持原状
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="skill-doctor v1")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
