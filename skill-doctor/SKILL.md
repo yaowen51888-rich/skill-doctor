@@ -1,6 +1,6 @@
 ---
 name: skill-doctor
-description: 体检与优化 AI Agent 的 skill (SKILL.md)，用户的问题分两类找它。①好不好用：skill 会不会被触发、description 质量、与其他 skill 抢触发、历史使用统计、内容是否被改过。②费不费钱：skill 的 token 成本结构、每次调用的开销。支持 Claude Code / Codex / DeepSeek Harness / OpenClaw / Hermes Agent 五平台。当用户说"skill 体检"、"skill 诊断"、"skill lint"、"触发率"、"skill 会触发吗"、"skill 使用统计"、"skill 成本"、"skill 花多少 token"时必须使用本 skill。
+description: 子命令：/skill-doctor list、lint、usage、cases、trigger、cost、drift、visibility（无参出菜单）。skill 体检与优化：会不会触发、description 质量、抢触发、使用统计、内容漂移；费不费钱：token 成本与调用开销。支持 Claude Code/Codex/DeepSeek Harness/OpenClaw/Hermes 五平台。说"skill 体检/诊断/lint/触发率/使用统计/成本"时必用。
 ---
 
 # Skill Doctor — 跨平台 Skill 体检
@@ -21,6 +21,22 @@ description: 体检与优化 AI Agent 的 skill (SKILL.md)，用户的问题分�
 | "OpenClaw 里这 skill 怎么不触发" | 可见性 | `visibility` |
 
 用户问题横跨多域（典型："全面体检一下 X"）→ 按体检→触发→成本顺序全跑。
+
+## 斜杠直展子命令（ARGUMENTS 直通）
+
+| 用户输入 | 执行 |
+|---|---|
+| `/skill-doctor`（无参数）或参数不识别 | 渲染上面能力路由表作菜单，问用户要查哪个 skill |
+| `list` | `list` 全平台枚举 |
+| `lint <名>` | `lint --skill <名>` + 语义复核 |
+| `usage <名>` | `usage --skill <名>` |
+| `cases <名>` | `cases --skill <名>` 采样预览（不花钱） |
+| `trigger <名>` | 先跑 `cases` 采样给用户确认，再 `trigger`（花钱须确认） |
+| `cost <名>` | `cost --skill <名>` |
+| `drift [<名>]` | `drift [--skill <名>]` |
+| `visibility [<名>]` | `visibility [--skill <名>]` |
+
+直展参数与自然语言问题走同一套路由：参数匹配上表就直接跑，没匹配就当自然语言问题处理。
 
 ## 通用步骤
 
