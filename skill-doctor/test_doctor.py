@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 from doctor import (  # noqa: E402
     case_role, collect_session_ids, est_tokens, extract_skill_calls,
     extract_slash_commands, first_user_prompt, is_target_skill,
-    overlap_rate, parse_frontmatter,
+    lint_one, overlap_rate, parse_frontmatter,
 )
 
 # --- 三平台提取形态 ---
@@ -79,6 +79,17 @@ QUOTED = '---\nname: q\ndescription: "单行带引号"\n---\n'
 assert parse_frontmatter(FOLD)["description"] == "第一行内容 第二行内容", "折叠块空格连接"
 assert parse_frontmatter(LIT)["description"] == "行A\n行B", "字面块保留换行"
 assert parse_frontmatter(QUOTED)["description"] == "单行带引号", "引号剥离"
+
+# --- R7 模型可见性: disable-model-invocation / frontmatter 缺失 ---
+FM_DISABLE = ('---\nname: d\ndescription: "x"\n'
+              'disable-model-invocation: true\n---\n')
+assert parse_frontmatter(FM_DISABLE)["disable-model-invocation"] == "true"
+BASE = {"name": "x", "description": "a" * 60, "dir": "x"}
+assert lint_one(dict(BASE), [])["R7"] == "ok", "默认模型可见"
+assert lint_one({**BASE, "model_invocable": False}, [])["R7"] == \
+    "disabled_model_invocation", "disable-model-invocation=true 报 R7"
+assert lint_one({**BASE, "frontmatter_ok": False}, [])["R7"] == \
+    "no_frontmatter", "frontmatter 缺失报 R7"
 
 # --- 竞争重叠率 ---
 assert overlap_rate("", "x") == 0.0

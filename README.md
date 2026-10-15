@@ -9,11 +9,11 @@ AI Agent skill（SKILL.md）的体检与成本核算工具。回答两个问题�
 | 命令 | 干什么 |
 |------|--------|
 | `list` | 枚举已装 skill 及 frontmatter |
-| `lint` | 机械检查：description 长度、场景信号、skill 间竞争重叠率、name 规范、YAML 多行折叠 |
-| `usage` | 历史调用统计。Skill 工具调用与斜杠直展（`<command-name>`）分列；trigger 测试会话自动剔除，不污染数据 |
+| `lint` | 机械检查：description 长度、场景信号、skill 间竞争重叠率、name 规范、模型可见性（`disable-model-invocation` / 无 SKILL.md = 模型永远看不到）、YAML 多行折叠 |
+| `usage` | 历史调用统计。Skill 工具调用与斜杠直展（`<command-name>`）分列，另列窗口内零调用的已装 skill；trigger 测试会话自动剔除，不污染数据 |
 | `cases` | 从真实使用历史采样生成触发测试集：正例取目标调用前的用户消息，反例取路由到竞品的 prompt，按 description 重叠率排序 |
 | `trigger` | 触发率实测。逐 case 跑 `claude -p`，输出 trigger_rate / false_trigger_rate 与逐条明细 |
-| `cost` | token 账单：description / body 估算 + 调用轮 output_tokens 实测与窗口总账 |
+| `cost` | token 账单：description / body / 随身文件（scripts、references）三笔估算 + 调用轮 output_tokens 实测与窗口总账 |
 | `drift` | 内容漂移检测。首次跑存快照，之后 diff 报告谁改了什么 |
 | `visibility` | OpenClaw 配置审计：skill 对哪些 agent 可见 |
 

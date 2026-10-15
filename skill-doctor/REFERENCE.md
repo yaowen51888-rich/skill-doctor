@@ -34,6 +34,12 @@ kebab-case、可读名词或动词短语，与目录名一致。
 - **Hermes**：skill 可能被 agent 自己改写过，报告当前内容与 git/备份的差异（漂移）
 - **dsh**：catalog 是 durable 去重的，description 只在列表变化时重发，长度权重可放宽
 
+### R7 模型可见性（跨平台）
+磁盘上存在但模型永远看不到的 skill，触发率恒为 0——description 调优前先查这里：
+- `disable-model-invocation: true` — 刻意只留斜杠直展。是设计则报告注明（不算病），
+  用户以为是自动触发则需去掉该标志
+- 无 SKILL.md / frontmatter 缺失 / 目录读不了 — 安装残缺，重装或删目录
+
 ## 报告模板
 
 ```markdown
@@ -49,6 +55,7 @@ kebab-case、可读名词或动词短语，与目录名一致。
 | R3 触发词 | ... | ... |
 | R4 竞争 | ... | 与 X 重叠 52%，X 的 description 覆盖了"YYY"场景 |
 | R5 name | ... | ... |
+| R7 可见性 | ... | disable-model-invocation / 无 SKILL.md / ✅ 模型可见 |
 
 ## 历史触发（30 天）
 - 调用 N 次，分布于 M 个会话

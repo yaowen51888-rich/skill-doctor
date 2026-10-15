@@ -52,7 +52,8 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 $(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py usage --skill <名>    # 历史统计
 ```
 
-lint 输出 R1 长度/R2 信号/R4 竞争/R5 name/YAML 截断的 verdict 后，
+lint 输出 R1 长度/R2 信号/R4 竞争/R5 name/R7 模型可见性（`disable-model-invocation: true`
+或无 SKILL.md = 模型永远看不到，触发率恒为 0，description 调优前先查它）的 verdict 后，
 **你对 flagged 项做语义复核**：R2 粗检漏掉的"何时用"语义、R3 触发词是否
 覆盖用户原话、R4 竞争对是真竞争还是误报。规则细则见 REFERENCE.md。
 
@@ -87,7 +88,8 @@ false_trigger_rate / 逐 case 明细；测试会话自动进黑名单不污染 u
 $(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py cost --skill <名> [--days 30]
 ```
 
-输出 description/body token 估算 + 调用轮 output_tokens 实测。
+输出 description/body/随身文件（scripts、references 等按需读取文件）三笔 token
+估算 + 调用轮 output_tokens 实测。
 渲染报告必须带"估算口径、不折算金额"说明。
 
 ## 专项（drift / visibility）
@@ -105,7 +107,8 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 
 - 触发率/统计**禁止跨平台合并口径**，只分平台报告
 - usage 统计口径：`calls`=Skill 工具调用，`slash_calls`=`<command-name>` 斜杠直展，
-  两者都算真实使用；trigger 测试会话（session 黑名单 `~/.skill-doctor/trigger_sessions.json`）
+  两者都算真实使用；`installed_unused`=窗口内零调用的已装 skill（"装了没动"清单）；
+  trigger 测试会话（session 黑名单 `~/.skill-doctor/trigger_sessions.json`）
   自动剔除，不计入
 
 平台路径/日志格式/adapter 施工图见 [PLATFORMS.md](PLATFORMS.md)。

@@ -5,13 +5,15 @@
   list   枚举已装 skill + 解析 frontmatter(claude-code/codex/dsh/openclaw/hermes 目录探测,
          格式同为 SKILL.md)
   usage  扫会话日志统计 skill 调用: Skill 工具 + 斜杠直展 command-name 形态,
-         trigger 测试会话已剔除(claude-code/codex 有日志路径; dsh/openclaw/hermes
-         提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
-  lint   机械体检 R1/R2粗检/R4/R5(确定性部分脚本化, R2/R3 语义判断留给模型, 见 SKILL.md)
+         并列出零调用的已装 skill(trigger 测试会话已剔除; claude-code/codex 有
+         日志路径; dsh/openclaw/hermes 提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
+  lint   机械体检 R1/R2粗检/R4/R5/R7(可见性: disable-model-invocation/无SKILL.md=
+         模型永远看不到, 触发率恒为0; R2/R3 语义判断留给模型, 见 SKILL.md)
   trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
   cases  从 usage 历史真实会话采样生成 trigger 测试集(正例=调过目标 skill 的会话
          首条 prompt, 反例=调了其他 skill 的会话 prompt, 数据驱动非编造)
-  cost   成本账单: desc/body token 估算 + 调用轮 output_tokens 实测(不出钱, 仅 claude-code)
+  cost   成本账单: desc/body/随身文件(脚本、参考资料)三笔 token 估算 +
+         调用轮 output_tokens 实测(不出钱, 仅 claude-code)
   drift  漂移检测: 对 skill 目录做内容快照, 对比上次快照报告增删改(平台无关, Hermes 自改场景主用)
   visibility 可见性审计: 读 openclaw.json, 报告 skill 对哪些 agent 可见(默认 OpenClaw)
 
@@ -57,7 +59,8 @@ def parse_frontmatter(text):
     lines = m.group(1).splitlines()
     i = 0
     while i < len(lines):
-        kv = re.match(r'^(name|description):\s*(.*)$', lines[i].strip())
+        kv = re.match(r'^(name|description|disable-model-invocation):\s*(.*)$',
+                      lines[i].strip())
         if not kv:
             i += 1
             continue
@@ -86,7 +89,8 @@ def scan_skills(platform):
             continue
         for md in sorted(base.glob("*/SKILL.md")):
             try:
-                fm = parse_frontmatter(md.read_text(encoding="utf-8", errors="replace"))
+                text = md.read_text(encoding="utf-8", errors="replace")
+                fm = parse_frontmatter(text)
             except OSError as e:
                 skills.append({"dir": str(md.parent), "error": str(e)})
                 continue
@@ -96,7 +100,15 @@ def scan_skills(platform):
                 "name": fm.get("name") or md.parent.name,
                 "description": desc,
                 "description_chars": len(desc),
+                "frontmatter_ok": text.startswith("---"),
+                # disable-model-invocation: true = 只留斜杠直展, 模型永远看不到
+                "model_invocable": str(fm.get("disable-model-invocation", "")
+                                       ).lower() not in ("true", "1"),
             })
+        # 有目录没 SKILL.md = 安装残缺, 模型同样看不到
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and not (child / "SKILL.md").is_file():
+                skills.append({"dir": str(child), "error": "no SKILL.md"})
     return skills, missing
 
 
@@ -251,10 +263,13 @@ def cmd_usage(args):
             sessions[n] = sessions.get(n, 0) + 1
 
     all_names = set(counter) | set(slash_counter)
+    # 已装但窗口内零调用: 装了没动的 skill 在 skill_calls 里不可见, 单列才看得见
+    unused = sorted({v for v in known.values() if v not in all_names})
     result = {
         "platform": args.platform,
         "window_days": args.days,
         "files_scanned_hint_lines": total_lines,
+        "installed_unused": {"count": len(unused), "skills": unused},
         "skill_calls": [
             {"skill": n, "calls": counter.get(n, 0),
              "slash_calls": slash_counter.get(n, 0),
@@ -325,18 +340,38 @@ def lint_one(skill, all_skills):
     kebab = bool(re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', n))
     r["R5"] = "ok" if (kebab and n == dir_name) else (
         "not_kebab" if not kebab else "mismatch_dir")
+
+    # R7 模型可见性: 模型看不到的 skill 触发率恒为 0, description 调优前先查这里
+    if not skill.get("frontmatter_ok", True):
+        r["R7"] = "no_frontmatter"
+    elif not skill.get("model_invocable", True):
+        r["R7"] = "disabled_model_invocation"
+    else:
+        r["R7"] = "ok"
     return r
 
 
 def cmd_lint(args):
     skills, _ = scan_skills(args.platform)
     if args.skill:
-        targets = [s for s in skills if args.skill.lower() in s.get("name", "").lower()]
+        targets = [s for s in skills if args.skill.lower() in s.get("name", "").lower()
+                   or args.skill.lower() in Path(s.get("dir", "")).name.lower()]
     else:
         targets = skills
-    results = [lint_one(s, skills) for s in targets if "error" not in s]
-    flagged = [r for r in results if r["R1"] != "ok" or r["R4_competitors"]
-               or r["R5"] != "ok" or not r["R2_scene_signal"]]
+    results = []
+    for s in targets:
+        if "error" in s:  # 无 SKILL.md/读不了的目录: R7 直接报, 不进逐项检查
+            results.append({"skill": Path(s["dir"]).name, "dir": s["dir"],
+                            "R7": "no_skill_md" if s["error"] == "no SKILL.md"
+                            else "unreadable",
+                            "error": s["error"]})
+        else:
+            results.append(lint_one(s, skills))
+    # .get 短路: error 条目无 R1/R5 键, 靠 R7!=ok 先命中
+    flagged = [r for r in results
+               if r.get("R7", "ok") != "ok" or r.get("R1", "ok") != "ok"
+               or r.get("R5", "ok") != "ok" or not r.get("R2_scene_signal")
+               or bool(r.get("R4_competitors"))]
     print(json.dumps({
         "platform": args.platform,
         "checked": len(results),
@@ -590,16 +625,23 @@ def cmd_cost(args):
 
     if target:
         out["description_tokens_est"] = est_tokens(target.get("description", ""))
-        files = []
-        for f in sorted(Path(target["dir"]).rglob("*.md")):
+        tdir = Path(target["dir"])
+        files, bundled = [], []
+        for f in sorted(tdir.rglob("*")):
+            if not f.is_file() or "__pycache__" in f.relative_to(tdir).parts:
+                continue
             try:
-                body = re.sub(r"^---\s*\n.*?\n---", "",
-                              f.read_text(encoding="utf-8", errors="replace"),
-                              flags=re.S)
-                files.append({"file": f.name, "tokens_est": est_tokens(body)})
+                raw = f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            rel = f.relative_to(tdir).as_posix()
+            if f.suffix.lower() == ".md":
+                body = re.sub(r"^---\s*\n.*?\n---", "", raw, flags=re.S)
+                files.append({"file": f.name, "tokens_est": est_tokens(body)})
+            else:  # 第三笔账: 按需读取的随身文件(脚本/参考资料), 二进制为上界估算
+                bundled.append({"file": rel, "tokens_est": est_tokens(raw)})
         out["body_files_tokens_est"] = files
+        out["bundled_files_tokens_est"] = bundled
     else:
         out["dir_found"] = False
         out["hint"] = "skill 目录不在当前扫描范围(可能装在别的项目), 仅输出调用统计"
