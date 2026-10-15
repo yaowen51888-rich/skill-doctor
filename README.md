@@ -1,8 +1,8 @@
 # skill-doctor
 
-[![python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)]()
-[![zero dependencies](https://img.shields.io/badge/dependencies-0-green)]()
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)]()
+![python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![zero dependencies](https://img.shields.io/badge/dependencies-0-green)
+![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
 
 AI Agent skill（SKILL.md）的体检与成本核算工具。
 *Health check & cost accounting for AI agent skills — triggering, description quality, usage stats, token cost.*
