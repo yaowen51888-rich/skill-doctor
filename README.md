@@ -9,7 +9,9 @@ AI Agent skill（SKILL.md）的体检与成本核算工具。
 
 回答两个问题：**好不好用**（会不会被触发、description 质量、有没有被别的 skill 抢触发、内容有没有被改过），**费不费钱**（token 成本结构、每次调用的开销）。
 
-零依赖，纯 Python 标准库。既是命令行工具，也是一个可被 Agent 触发的 skill——装进 skills 目录后对 Agent 说"skill 体检"即可使用。
+零依赖，纯 Python 标准库（Python 3.8+）。既是命令行工具，也是一个可被 Agent 触发的 skill——装进 skills 目录后对 Agent 说"skill 体检"即可使用。
+
+`trigger` 子命令需要 `claude` CLI 在 PATH 且会产生真实模型调用（花钱），其余子命令全程零成本。
 
 ## 快速开始
 
@@ -49,6 +51,24 @@ installed_unused: 25 / 44   # 57% 的已装 skill 三十天零调用
 | `visibility` | OpenClaw 配置审计：skill 对哪些 agent 可见 |
 
 语义判断（触发词覆盖、竞争真伪）lint 只做粗检，最终由模型复核——机械规则管确定性部分，不做玄学打分。
+
+## 典型工作流：实测一个 skill 的触发率
+
+```bash
+cd skills/skill-doctor
+# 1. 体检：先确认模型看得见它、description 没毛病（不花钱）
+python scripts/doctor.py lint --skill aihot
+
+# 2. 从你的真实使用历史采样测试集：正例=当初真触发它的用户原话，
+#    反例=被竞品抢走的 prompt（不花钱）
+python scripts/doctor.py cases --skill aihot --per 5 --out cases.json
+
+# 3. 逐 case 回放，报真触发率 / 误触发率（每个 case 一次真实模型调用）
+python scripts/doctor.py trigger --skill aihot --cases cases.json
+
+# 4. 看账单：description / body / 随身文件各占多少 token
+python scripts/doctor.py cost --skill aihot
+```
 
 ## 与同类工具的区别
 
@@ -109,6 +129,14 @@ cd skills/skill-doctor && python test_doctor.py    # 零框架 assert，全过�
 - token 为估算 + 实测混合口径，不折算金额
 - 触发率、使用统计分平台报告，不跨平台合并
 - `trigger` 每个 case 是一次真实模型调用，花钱；`cases` 采样与全流程不花钱
+
+## 仓库结构
+
+```text
+skills/skill-doctor/    skill 本体：SKILL.md（Agent 入口）+ scripts/doctor.py（CLI）
+                        + PLATFORMS.md（平台适配）/ REFERENCE.md（lint 细则）
+.claude-plugin/         Claude Code 插件清单（仓库自带 marketplace，自举式发布）
+```
 
 ## License
 
