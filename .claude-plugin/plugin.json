@@ -1,0 +1,8 @@
+{
+  "name": "skill-doctor",
+  "description": "Skill 体检与成本核算：lint（含模型可见性）、使用统计、触发率实测、token 三笔账、漂移检测。零依赖纯标准库。",
+  "version": "1.0.0",
+  "author": { "name": "yaowen51888-rich" },
+  "homepage": "https://github.com/yaowen51888-rich/skill-doctor",
+  "repository": "https://github.com/yaowen51888-rich/skill-doctor"
+}

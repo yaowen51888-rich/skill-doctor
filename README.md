@@ -15,8 +15,8 @@ AI Agent skill（SKILL.md）的体检与成本核算工具。
 
 ```bash
 git clone https://github.com/yaowen51888-rich/skill-doctor.git
-python skill-doctor/scripts/doctor.py lint          # 机械体检本机所有 skill
-python skill-doctor/scripts/doctor.py usage --days 30   # 谁被用过、谁装了没动
+python skills/skill-doctor/scripts/doctor.py lint              # 机械体检本机所有 skill
+python skills/skill-doctor/scripts/doctor.py usage --days 30   # 谁被用过、谁装了没动
 ```
 
 真机输出示例（R7 模型可见性检查——这些 skill 在磁盘上，但模型永远看不到，触发率恒为 0）：
@@ -69,13 +69,23 @@ skill 审计工具已经不少（安全扫描、静态打分、prose 纪律各�
 | Codex | list / lint / usage / cost 可用（日志形态由 fixture 锁定） |
 | DeepSeek Harness / OpenClaw / Hermes | 调用提取逻辑已实现，日志落盘路径待真机确认 |
 
-平台路径与日志格式细节见 [skill-doctor/PLATFORMS.md](skill-doctor/PLATFORMS.md)。
+平台路径与日志格式细节见 [skills/skill-doctor/PLATFORMS.md](skills/skill-doctor/PLATFORMS.md)。
 
-## 安装为 skill
+## 安装
+
+三种方式，任选其一：
 
 ```bash
+# ① skills CLI（Claude Code / Codex / Cursor 等 20+ agent 通用）
+npx skills add yaowen51888-rich/skill-doctor
+
+# ② Claude Code 插件（本仓库自带 marketplace，自举式布局）
+claude plugin marketplace add yaowen51888-rich/skill-doctor
+claude plugin install skill-doctor@skill-doctor-marketplace
+
+# ③ 手动复制
 git clone https://github.com/yaowen51888-rich/skill-doctor.git
-cp -r skill-doctor/skill-doctor ~/.claude/skills/skill-doctor    # Claude Code
+cp -r skills/skill-doctor ~/.claude/skills/skill-doctor
 ```
 
 装完输入 `/skill-doctor`（不带参数）即出功能菜单，所有子命令一屏可见。
@@ -83,7 +93,7 @@ cp -r skill-doctor/skill-doctor ~/.claude/skills/skill-doctor    # Claude Code
 Windows 可用 junction 免复制、改源即同步：
 
 ```bat
-mklink /J "%USERPROFILE%\.claude\skills\skill-doctor" "<repo>\skill-doctor"
+mklink /J "%USERPROFILE%\.claude\skills\skill-doctor" "<repo>\skills\skill-doctor"
 ```
 
 注意：删 junction 只能 `rmdir`，`rm -rf` 会穿透删掉源目录。
@@ -91,7 +101,7 @@ mklink /J "%USERPROFILE%\.claude\skills\skill-doctor" "<repo>\skill-doctor"
 ## 测试
 
 ```bash
-cd skill-doctor && python test_doctor.py    # 零框架 assert，全过输出 ALL PASS
+cd skills/skill-doctor && python test_doctor.py    # 零框架 assert，全过输出 ALL PASS
 ```
 
 ## 口径约定
