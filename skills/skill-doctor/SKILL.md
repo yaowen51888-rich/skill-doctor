@@ -1,6 +1,6 @@
 ---
 name: skill-doctor
-description: 子命令：/skill-doctor list、lint、usage、cases、trigger、cost、drift、visibility（无参出菜单）。skill 体检与优化：会不会触发、description 质量、抢触发、使用统计、内容漂移；费不费钱：token 成本与调用开销。支持 Claude Code/Codex/DeepSeek Harness/OpenClaw/Hermes 五平台。说"skill 体检/诊断/lint/触发率/使用统计/成本"时必用。
+description: 子命令：/skill-doctor list、lint、usage、cases、trigger、ablate、steal、cost、drift、visibility（无参出菜单）。skill 体检与优化：会不会触发、description 质量（逐句消融）、抢触发实证、使用统计、内容漂移；费不费钱：token 成本与调用开销。支持 Claude Code/Codex/DeepSeek Harness/OpenClaw/Hermes 五平台。说"skill 体检/诊断/lint/触发率/使用统计/成本"时必用。
 ---
 
 # Skill Doctor — 跨平台 Skill 体检
@@ -13,9 +13,10 @@ description: 子命令：/skill-doctor list、lint、usage、cases、trigger、c
 | 用户在问 | 域 | 命令 |
 |---|---|---|
 | "这 skill 的 description 写得好不好" | 体检 | `lint` |
-| "别的 skill 会不会抢它的触发" | 体检 | `lint`（R4 竞争） |
+| "别的 skill 会不会抢它的触发" | 体检 | `lint`（R4 竞争嫌疑）+ `steal`（历史实证） |
 | "这 skill 被用过多少次、什么时候用的" | 体检 | `usage` |
 | "这 skill 会不会被触发 / 怎么测触发率" | 触发 | `trigger` |
+| "description 哪句在起作用 / 哪句白占 token" | 触发 | `ablate`（逐句消融） |
 | "这 skill 每次花多少 token / 值不值" | 成本 | `cost` |
 | "skill 内容怎么变了 / 被谁改了" | 漂移 | `drift` |
 | "OpenClaw 里这 skill 怎么不触发" | 可见性 | `visibility` |
@@ -32,6 +33,8 @@ description: 子命令：/skill-doctor list、lint、usage、cases、trigger、c
 | `usage <名>` | `usage --skill <名>` |
 | `cases <名>` | `cases --skill <名>` 采样预览（不花钱） |
 | `trigger <名>` | 先跑 `cases` 采样给用户确认，再 `trigger`（花钱须确认） |
+| `ablate <名>` | 先 `cases` 确认，再 `ablate`（花钱，报每句贡献） |
+| `steal <名>` | `steal --skill <名>`（读历史，不花钱） |
 | `cost <名>` | `cost --skill <名>` |
 | `drift [<名>]` | `drift [--skill <名>]` |
 | `visibility [<名>]` | `visibility [--skill <名>]` |
@@ -83,6 +86,14 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 false_trigger_rate 及 Wilson 置信区间（--repeats ≥3 才有意义）与逐 case 明细
 （stable_hit / intermittent / miss）；附环境快照（claude 版本、模型、已装 skill 数）
 保证跨时间可比；测试会话自动进黑名单不污染 usage。
+
+**消融（ablate，花钱）**：description 逐句删掉各跑一遍正例，触发率掉幅 = 该句
+边际贡献——"删掉触发词句，1.0→0.33"是哪句保命、哪句白占 token 的因果证据。
+SKILL.md 改写全程 try/finally 还原 + sha256 校验；跑前告知组数（句数+1）×per×repeats。
+
+**抢触发实证（steal，不花钱）**：R4 只给嫌疑（description 重叠率），steal 给判决——
+历史里 prompt 命中目标 description 却实际路由去了谁，won/stolen/missed + 竞品排行
++ evidence 逐条复核（重叠率是粗筛，真伪由模型判断）。
 
 ## 成本域（cost）
 

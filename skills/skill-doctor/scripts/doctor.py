@@ -15,6 +15,10 @@
          (v2, 仅 claude-code)
   cases  从 usage 历史真实会话采样生成 trigger 测试集(正例=调过目标 skill 的会话
          首条 prompt, 反例=调了其他 skill 的会话 prompt, 数据驱动非编造)
+  ablate description 逐句消融: 逐句删掉跑正例, 触发率掉幅=该句边际贡献,
+         哪句保命哪句白占 token 的因果证据(跑 claude -p 花真钱, 仅 claude-code)
+  steal  抢触发实证: prompt 命中目标 description 却路由别处的真实统计,
+         won/stolen/missed + 竞品排行, R4 重叠率的判决版(不花钱)
   cost   成本账单: desc/body/随身文件(脚本、参考资料)三笔 token 估算 +
          调用轮 output_tokens 实测 + 注入成本 input_tokens 差分实测
          (不出钱, 仅 claude-code)
@@ -82,6 +86,43 @@ def parse_frontmatter(text):
             out[kv.group(1)] = val.strip('"').strip("'")
         i += 1
     return out
+
+
+def split_sentences(desc):
+    """description 切句(中英标点均可), 滤空。消融的最小单元。"""
+    parts = re.split(r'[。；;.!？?\n]+', desc)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def rewrite_description(text, new_desc):
+    """文本手术: 只替换 frontmatter 的 description 值, 其余字节不动。
+
+    兼容单行值与 >-/>/| 折叠块(整块吞掉); 新值压成单行; 无 frontmatter
+    或无 description 键时原样返回(调用方据此中止消融)。
+    """
+    lines = text.split("\n")
+    try:
+        start = next(i for i, l in enumerate(lines) if l.strip() == "---")
+    except StopIteration:
+        return text
+    out, i, replaced = [], start + 1, False
+    while i < len(lines) and lines[i].strip() != "---":
+        if not replaced and re.match(r'^description\s*:', lines[i]):
+            out.append("description: " + " ".join(new_desc.split()))
+            replaced = True
+            val = lines[i].split(":", 1)[1].strip()
+            if val and val[0] in ">|":  # 折叠块: 连续缩进行整体属于旧值
+                i += 1
+                while i < len(lines) and (not lines[i].strip() or lines[i][:1].isspace()):
+                    i += 1
+                continue
+        else:
+            out.append(lines[i])
+        i += 1
+    if not replaced:
+        return text
+    out.extend(lines[i:])
+    return "\n".join(out)
 
 
 def scan_skills(platform):
@@ -654,8 +695,16 @@ def claude_version():
         return None
 
 
+def load_cases(path):
+    """读 cases 文件, 兼容 cases 命令的 {skill,note,cases} 包装与裸列表两种形态。"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        data = data.get("cases", [])
+    return data
+
+
 def cmd_trigger(args):
-    cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+    cases = load_cases(args.cases)
     print(f"# 将执行 {len(cases)} case × {args.repeats} 次 = "
           f"{len(cases) * args.repeats} 次 claude -p 真实模型调用(花钱), "
           f"目标 skill: {args.skill}", file=sys.stderr)
@@ -723,6 +772,174 @@ def cmd_trigger(args):
         },
         "test_sessions_excluded": len(test_sessions),
         "results": results,
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_ablate(args):
+    """description 逐句消融: 删掉句 i 跑正例, 触发率掉幅 = 该句边际贡献。
+
+    因果证据(非直觉): 哪句保命、哪句白占 token。SKILL.md 改写后 finally 还原
+    并校验 sha256, 防中断留脏文件。
+    """
+    import hashlib
+    import tempfile
+    skills = scan_skills(args.platform)[0]
+    target = next((s for s in skills
+                   if is_target_skill(s.get("name", ""), args.skill)), None)
+    if not target or "error" in target:
+        print(json.dumps({"error": f"skill not found: {args.skill}"},
+                         ensure_ascii=False, indent=2))
+        return
+    cases = load_cases(args.cases)
+    pos = [c["prompt"] for c in cases if c.get("expect", True)][:args.per]
+    sents = split_sentences(target.get("description", ""))
+    if not pos:
+        print(json.dumps({"error": "cases.json 无正例"}, ensure_ascii=False, indent=2))
+        return
+    if len(sents) < 2:
+        print(json.dumps({"error": f"description 仅 {len(sents)} 句, 无从消融"},
+                         ensure_ascii=False, indent=2))
+        return
+
+    skill_md = Path(target["dir"]) / "SKILL.md"
+    original = skill_md.read_text(encoding="utf-8")
+    orig_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    runs_per_group = len(pos) * args.repeats
+    groups = len(sents) + 1  # baseline + 每句一组
+    print(f"# 将执行 {groups} 组 × {runs_per_group} 次 = "
+          f"{groups * runs_per_group} 次 claude -p(花钱), 目标 skill: {args.skill}",
+          file=sys.stderr)
+
+    test_sessions = set()
+    neutral_cwd = tempfile.gettempdir()
+
+    def run_group():
+        hits = 0
+        for _ in range(args.repeats):
+            for p in pos:
+                stream = run_claude_headless(p, max_turns=args.max_turns,
+                                             cwd=neutral_cwd)
+                test_sessions.update(collect_session_ids(stream))
+                called = []
+                for line in stream.splitlines():
+                    called += extract_skill_calls(line)
+                if any(is_target_skill(n, args.skill) for n in called):
+                    hits += 1
+        return hits / runs_per_group
+
+    rows = []
+    try:
+        baseline = run_group()
+        rows.append({"index": None, "removed": "(基线, 原样)",
+                     "rate": round(baseline, 3), "drop": 0.0})
+        for idx, s in enumerate(sents):
+            ablated_desc = " ".join(x for j, x in enumerate(sents) if j != idx)
+            skill_md.write_text(rewrite_description(original, ablated_desc),
+                                encoding="utf-8")
+            rate = run_group()
+            rows.append({"index": idx, "removed": s[:50],
+                         "rate": round(rate, 3),
+                         "drop": round(rate - baseline, 3)})
+    finally:  # 无论中途发生什么, SKILL.md 必须还原
+        skill_md.write_text(original, encoding="utf-8")
+    restored = hashlib.sha256(
+        skill_md.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    if test_sessions:
+        save_trigger_blocklist(load_trigger_blocklist() | test_sessions)
+    rows.sort(key=lambda r: (r["drop"], r["index"] or 0))
+    variance = len({r["rate"] for r in rows}) > 1
+    print(json.dumps({
+        "platform": args.platform,
+        "skill": args.skill,
+        "sentences": len(sents),
+        "cases_per_group": len(pos),
+        "repeats": args.repeats,
+        "baseline_rate": round(baseline, 3),
+        "rows": rows,
+        "restored_ok": restored == orig_hash,
+        "note": "drop=消融后-基线, 负得越深=该句越保命; "
+                + ("" if variance else
+                   "全组零方差: 改写可能未生效(skill 列表缓存?), 结论不可用"),
+    }, ensure_ascii=False, indent=2))
+
+
+def route_windows(lines, known):
+    """(prompt, [被调 skill 规范名]) 窗口: 每条 NL 用户 prompt 到下一条 prompt 间的全部调用。
+
+    无 NL prompt 的窗口(斜杠直展/纯工具会话首段)整体丢弃——无语境无从判路由。
+    """
+    windows = []
+    cur_prompt, cur_calls = None, []
+    for line in lines:
+        if '"type":"user"' in line:
+            p = first_user_prompt(line)
+            if p:
+                if cur_prompt is not None:
+                    windows.append((cur_prompt, cur_calls))
+                cur_prompt, cur_calls = p, []
+        if '"skill"' in line or '"Skill"' in line:
+            cur_calls += extract_skill_calls(line)
+        cur_calls += slash_calls_in_line(line, known)
+    if cur_prompt is not None:
+        windows.append((cur_prompt, cur_calls))
+    return windows
+
+
+def cmd_steal(args):
+    """抢触发实证: prompt 命中目标 description 却路由别处的真实历史统计。
+
+    R4(lint) 只给嫌疑(desc 重叠率), 这里给判决——路由结果是谁赢谁输。
+    """
+    skills = scan_skills(args.platform)[0]
+    target = next((s for s in skills
+                   if is_target_skill(s.get("name", ""), args.skill)), None)
+    if not target or "error" in target or not target.get("description"):
+        print(json.dumps({"error": f"skill not found or no description: {args.skill}"},
+                         ensure_ascii=False, indent=2))
+        return
+    tdesc = target["description"]
+    known = known_skill_names(args.platform)
+    won = stolen = missed = 0
+    stolen_by = Counter()
+    evidence = []
+    for f in iter_logs(args.platform, args.days):
+        try:
+            lines = f.open(encoding="utf-8", errors="replace").readlines()
+        except OSError:
+            continue
+        for prompt, calls in route_windows(lines, known):
+            if any(is_target_skill(n, args.skill) for n in calls):
+                won += 1
+                continue
+            ov = overlap_rate(prompt, tdesc)
+            if ov < args.overlap:  # prompt 与目标 desc 无语义命中, 不算被抢
+                continue
+            rivals = sorted({n for n in calls
+                             if not is_target_skill(n, args.skill)})
+            if rivals:
+                stolen += 1
+                for r in rivals:
+                    stolen_by[r] += 1
+            else:
+                missed += 1  # 高重叠却零调用: 漏触发线索
+            evidence.append({"prompt": prompt[:80], "routed_to": rivals[:3],
+                             "overlap": ov})
+    evidence.sort(key=lambda e: -e["overlap"])
+    total = won + stolen
+    print(json.dumps({
+        "platform": args.platform,
+        "skill": args.skill,
+        "window_days": args.days,
+        "overlap_threshold": args.overlap,
+        "won": won,
+        "stolen": stolen,
+        "missed": missed,
+        "steal_rate": round(stolen / total, 3) if total else None,
+        "stolen_by": [{"skill": s, "count": c}
+                      for s, c in stolen_by.most_common(5)],
+        "evidence": evidence[:10],
+        "note": "重叠率是机械粗筛, evidence 逐条由模型复核真伪; "
+                "missed=高重叠但零调用(漏触发线索)",
     }, ensure_ascii=False, indent=2))
 
 
@@ -1041,6 +1258,25 @@ def main():
     p_cases.add_argument("--out", default=None,
                          help="写出 cases.json 路径(缺省打印 stdout)")
 
+    p_abl = sub.add_parser("ablate",
+                           help="description 逐句消融(跑 claude -p, 花真钱)")
+    p_abl.add_argument("--skill", required=True, help="目标 skill 名")
+    p_abl.add_argument("--cases", required=True, help="cases.json 路径(取正例)")
+    p_abl.add_argument("--per", type=int, default=3,
+                       help="每组用前 N 条正例(默认 3)")
+    p_abl.add_argument("--repeats", type=int, default=1)
+    p_abl.add_argument("--max-turns", type=int, default=2)
+    p_abl.add_argument("--platform", default="claude-code",
+                       choices=list(PLATFORM_DIRS) + ["all"])
+
+    p_steal = sub.add_parser("steal", help="抢触发实证(读历史, 不花钱)")
+    p_steal.add_argument("--skill", required=True, help="目标 skill 名")
+    p_steal.add_argument("--days", type=int, default=30)
+    p_steal.add_argument("--overlap", type=float, default=0.3,
+                         help="prompt 与目标 description 的重叠率阈值(默认 0.3)")
+    p_steal.add_argument("--platform", default="claude-code",
+                         choices=[p for p in SESSION_LOG_DIRS if SESSION_LOG_DIRS[p]])
+
     p_cost = sub.add_parser("cost", help="成本账单(估算+实测, 不出钱)")
     p_cost.add_argument("--skill", required=True, help="目标 skill 名")
     p_cost.add_argument("--platform", default="claude-code",
@@ -1072,6 +1308,10 @@ def main():
         cmd_trigger(args)
     elif args.cmd == "cases":
         cmd_cases(args)
+    elif args.cmd == "ablate":
+        cmd_ablate(args)
+    elif args.cmd == "steal":
+        cmd_steal(args)
     elif args.cmd == "cost":
         cmd_cost(args)
     elif args.cmd == "drift":

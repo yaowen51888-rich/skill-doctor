@@ -83,6 +83,8 @@ python scripts/doctor.py cost --skill aihot
 | `usage` | 历史调用统计：Skill 工具调用与斜杠直展分列，零调用已装 skill 单列，真实使用场景语义聚类（top3） |
 | `cases` | 从真实历史采样触发测试集，反例按竞争度排序 |
 | `trigger` | 触发率实测：trigger_rate / false_trigger_rate + Wilson 置信区间（`--repeats`）+ 环境快照，逐 case 明细 |
+| `ablate` | description 逐句消融：删掉每句各跑一遍，触发率掉幅 = 该句边际贡献（哪句保命、哪句白占 token 的因果证据） |
+| `steal` | 抢触发实证：prompt 命中 description 却路由别处的真实历史统计，won/stolen/missed + 竞品排行 |
 | `cost` | token 三笔账 + 调用轮 output_tokens 实测 + **注入成本实测**（调用后 input_tokens 差分，斜杠直展同计） |
 | `drift` | 内容漂移检测：快照 diff，谁改了什么 |
 | `visibility` | OpenClaw 配置审计：skill 对哪些 agent 可见 |

@@ -12,7 +12,8 @@ from doctor import (  # noqa: E402
     InputDeltaTracker, case_role, cluster_prompts, collect_session_ids,
     effective_input, est_tokens, extract_skill_calls, extract_slash_commands,
     first_user_prompt, is_target_skill, lint_one, overlap_rate,
-    parse_frontmatter, parse_usage, scenarios_for, wilson_ci,
+    parse_frontmatter, parse_usage, rewrite_description, route_windows,
+    scenarios_for, split_sentences, wilson_ci,
 )
 
 # --- 三平台提取形态 ---
@@ -131,6 +132,38 @@ assert sorted(len(c) for c in clusters) == [3, 3], f"两簇分离失败: {cluste
 assert scenarios_for(["a", "b"]) is None, "不足 3 条不聚类"
 sc = scenarios_for(A + B)
 assert sc and sc[0]["count"] >= 3 and len(sc[0]["top_terms"]) >= 1, sc
+
+# --- ablate: 切句 + description 改写手术 ---
+assert split_sentences("第一句。第二句；third. 第四句") == \
+    ["第一句", "第二句", "third", "第四句"], split_sentences("第一句。第二句；third. 第四句")
+assert split_sentences("一句") == ["一句"]
+
+SRC1 = '---\nname: a\ndescription: 旧描述\nauthor: x\n---\nbody'
+out1 = rewrite_description(SRC1, "新描述")
+assert "description: 新描述" in out1 and "author: x" in out1 \
+    and "旧描述" not in out1, out1
+SRC2 = "---\nname: b\ndescription: >-\n  第一行\n  第二行\nauthor: y\n---\n"
+out2 = rewrite_description(SRC2, "替换 后的")
+assert "description: 替换 后的" in out2 and "第一行" not in out2 \
+    and "author: y" in out2, out2
+assert rewrite_description("no frontmatter", "x") == "no frontmatter"
+assert rewrite_description("---\nname: c\n---\n", "x") == "---\nname: c\n---\n", \
+    "无 description 键原样返回"
+
+# --- steal: 路由窗口配对 ---
+EV = [
+    '{"type":"user","message":{"content":"查AI新闻"}}',
+    CC_LINE,
+    TOOL_RESULT,
+    ASSISTANT,
+]
+KNOWN = {"aihot": "aihot"}
+assert route_windows(EV, KNOWN) == [("查AI新闻", ["aihot"])], route_windows(EV, KNOWN)
+EV2 = [CMD_LINE2] + EV  # 首段斜杠直展无 NL prompt, 整窗丢弃
+assert route_windows(EV2, KNOWN) == [("查AI新闻", ["aihot"])], route_windows(EV2, KNOWN)
+EV3 = ['{"type":"user","message":{"content":"第一个问题"}}', CC_LINE,
+       '{"type":"user","message":{"content":"第二个问题"}}']
+assert route_windows(EV3, KNOWN) == [("第一个问题", ["aihot"]), ("第二个问题", [])]
 
 # --- 竞争重叠率 ---
 assert overlap_rate("", "x") == 0.0
