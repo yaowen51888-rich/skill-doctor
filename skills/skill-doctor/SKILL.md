@@ -76,11 +76,13 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 ```
 
 ```bash
-$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json> [--max-turns N]
+$(command -v python3 || command -v python || command -v py) <本skill目录>/scripts/doctor.py trigger --skill <名> --cases <cases.json> [--max-turns N] [--repeats N]
 ```
 
-每个 case = 1 次真实模型调用（花钱），跑前告知用户。输出 trigger_rate /
-false_trigger_rate / 逐 case 明细；测试会话自动进黑名单不污染 usage。
+每个 case × repeats = 真实模型调用次数（花钱），跑前告知用户。输出 trigger_rate /
+false_trigger_rate 及 Wilson 置信区间（--repeats ≥3 才有意义）与逐 case 明细
+（stable_hit / intermittent / miss）；附环境快照（claude 版本、模型、已装 skill 数）
+保证跨时间可比；测试会话自动进黑名单不污染 usage。
 
 ## 成本域（cost）
 
@@ -89,7 +91,8 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 ```
 
 输出 description/body/随身文件（scripts、references 等按需读取文件）三笔 token
-估算 + 调用轮 output_tokens 实测。
+估算 + 调用轮 output_tokens 实测 + **注入成本实测**（调用后一轮 input_tokens 差分
+= skill 正文进上下文的真实开销，斜杠直展同样计）。
 渲染报告必须带"估算口径、不折算金额"说明。
 
 ## 专项（drift / visibility）
@@ -107,7 +110,8 @@ $(command -v python3 || command -v python || command -v py) <本skill目录>/scr
 
 - 触发率/统计**禁止跨平台合并口径**，只分平台报告
 - usage 统计口径：`calls`=Skill 工具调用，`slash_calls`=`<command-name>` 斜杠直展，
-  两者都算真实使用；`installed_unused`=窗口内零调用的已装 skill（"装了没动"清单）；
+  两者都算真实使用；`scenarios`=工具调用前 prompt 的语义聚类场景（斜杠直展无 NL
+  语境，不计入）；`installed_unused`=窗口内零调用的已装 skill（"装了没动"清单）；
   trigger 测试会话（session 黑名单 `~/.skill-doctor/trigger_sessions.json`）
   自动剔除，不计入
 

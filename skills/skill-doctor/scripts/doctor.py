@@ -5,15 +5,19 @@
   list   枚举已装 skill + 解析 frontmatter(claude-code/codex/dsh/openclaw/hermes 目录探测,
          格式同为 SKILL.md)
   usage  扫会话日志统计 skill 调用: Skill 工具 + 斜杠直展 command-name 形态,
-         并列出零调用的已装 skill(trigger 测试会话已剔除; claude-code/codex 有
-         日志路径; dsh/openclaw/hermes 提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
+         并列出零调用的已装 skill; 调用前 prompt 语义聚类出真实使用场景(top3)
+         (trigger 测试会话已剔除; claude-code/codex 有日志路径; dsh/openclaw/hermes
+         提取逻辑已支持但落盘路径待真机确认, 见 PLATFORMS.md)
   lint   机械体检 R1/R2粗检/R4/R5/R7(可见性: disable-model-invocation/无SKILL.md=
          模型永远看不到, 触发率恒为0; R2/R3 语义判断留给模型, 见 SKILL.md)
-  trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发(v2, 仅 claude-code)
+  trigger 回放触发测试: 用 cases.json 逐条跑 claude -p, 统计触发率/误触发,
+         --repeats N 重复测量出 Wilson 置信区间, 附环境快照保证跨时间可比
+         (v2, 仅 claude-code)
   cases  从 usage 历史真实会话采样生成 trigger 测试集(正例=调过目标 skill 的会话
          首条 prompt, 反例=调了其他 skill 的会话 prompt, 数据驱动非编造)
   cost   成本账单: desc/body/随身文件(脚本、参考资料)三笔 token 估算 +
-         调用轮 output_tokens 实测(不出钱, 仅 claude-code)
+         调用轮 output_tokens 实测 + 注入成本 input_tokens 差分实测
+         (不出钱, 仅 claude-code)
   drift  漂移检测: 对 skill 目录做内容快照, 对比上次快照报告增删改(平台无关, Hermes 自改场景主用)
   visibility 可见性审计: 读 openclaw.json, 报告 skill 对哪些 agent 可见(默认 OpenClaw)
 
@@ -243,20 +247,34 @@ def cmd_usage(args):
     counter = Counter()
     slash_counter = Counter()
     sessions = {}
+    prompts_by_skill = {}  # {name: [去重的触发前用户 prompt]} — 场景聚类原料
     total_lines = 0
     known = known_skill_names(args.platform)
     for f in iter_logs(args.platform, args.days):
         used_here = set()
+        last_prompt = None
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
+                if '"type":"user"' in line:
+                    p = first_user_prompt(line)
+                    if p:
+                        last_prompt = p
                 if '"Skill"' in line or '"skill"' in line:
                     total_lines += 1
                     for name in extract_skill_calls(line):
                         counter[name] += 1
                         used_here.add(name)
+                        if last_prompt:
+                            seen = prompts_by_skill.setdefault(name, [])
+                            if last_prompt not in seen:
+                                seen.append(last_prompt)
                 for name in slash_calls_in_line(line, known):
                     slash_counter[name] += 1
                     used_here.add(name)
+                    if last_prompt:
+                        seen = prompts_by_skill.setdefault(name, [])
+                        if last_prompt not in seen:
+                            seen.append(last_prompt)
         except OSError:
             continue
         for n in used_here:
@@ -265,19 +283,23 @@ def cmd_usage(args):
     all_names = set(counter) | set(slash_counter)
     # 已装但窗口内零调用: 装了没动的 skill 在 skill_calls 里不可见, 单列才看得见
     unused = sorted({v for v in known.values() if v not in all_names})
+    entries = []
+    for n in sorted(all_names, key=lambda k: -(counter[k] + slash_counter[k])):
+        e = {"skill": n, "calls": counter.get(n, 0),
+             "slash_calls": slash_counter.get(n, 0),
+             "sessions": sessions.get(n, 0),
+             # 历史计数里目录已删的 skill 标 false, 不静默剔除(历史趋势仍有参考价值)
+             "installed": n in known}
+        sc = scenarios_for(prompts_by_skill.get(n, []))
+        if sc:
+            e["scenarios"] = sc
+        entries.append(e)
     result = {
         "platform": args.platform,
         "window_days": args.days,
         "files_scanned_hint_lines": total_lines,
         "installed_unused": {"count": len(unused), "skills": unused},
-        "skill_calls": [
-            {"skill": n, "calls": counter.get(n, 0),
-             "slash_calls": slash_counter.get(n, 0),
-             "sessions": sessions.get(n, 0),
-             # 历史计数里目录已删的 skill 标 false, 不静默剔除(历史趋势仍有参考价值)
-             "installed": n in known}
-            for n in sorted(all_names, key=lambda k: -(counter[k] + slash_counter[k]))
-        ],
+        "skill_calls": entries,
     }
     if args.skill:
         result["skill_calls"] = [x for x in result["skill_calls"] if args.skill.lower() in x["skill"].lower()]
@@ -308,6 +330,65 @@ def overlap_rate(a, b):
     if not ta or not tb:
         return 0.0
     return round(len(ta & tb) / min(len(ta), len(tb)), 3)
+
+
+def cosine_sets(a, b):
+    """集合余弦相似度。"""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / ((len(a) * len(b)) ** 0.5)
+
+
+def cluster_prompts(prompts, threshold=0.25):
+    """leader 聚类, 返回索引簇列表(按 size 降序, 同 size 按代表 prompt 序)。
+
+    向量 = tokens() 集合, 簇心 = 成员并集; 按 token 数降序遍历保证确定性。
+    """
+    toks = [tokens(p) for p in prompts]
+    order = sorted(range(len(prompts)), key=lambda i: (-len(toks[i]), prompts[i]))
+    clusters = []  # [{"members": [i], "center": set}]
+    for i in order:
+        for c in clusters:
+            if cosine_sets(toks[i], c["center"]) >= threshold:
+                c["members"].append(i)
+                c["center"] |= toks[i]
+                break
+        else:
+            clusters.append({"members": [i], "center": set(toks[i])})
+    clusters.sort(key=lambda c: (-len(c["members"]), prompts[c["members"][0]]))
+    return [c["members"] for c in clusters]
+
+
+def scenarios_for(prompts):
+    """≥3 条不同 prompt 才聚类; 返回 top3 场景簇摘要, 不足返回 None。
+
+    top_terms = 簇内过半共有且全局不过半的 token(有区分度), 按簇内频次排序。
+    """
+    if len(prompts) < 3:
+        return None
+    toks = [tokens(p) for p in prompts]
+    global_counts = Counter()
+    for t in toks:
+        global_counts.update(t)
+    n = len(prompts)
+    out = []
+    for members in cluster_prompts(prompts):
+        cnt = Counter()
+        for i in members:
+            cnt.update(toks[i])
+        terms = [t for t, c in cnt.items()
+                 if c * 2 > len(members) and global_counts[t] * 2 <= n]
+        terms.sort(key=lambda t: (-cnt[t], t))
+        center = set().union(*(toks[i] for i in members))
+        rep = max(members, key=lambda i: (cosine_sets(toks[i], center), -i))
+        out.append({
+            "count": len(members),
+            "representative": prompts[rep][:60],
+            "top_terms": terms[:5],
+        })
+        if len(out) == 3:
+            break
+    return out
 
 
 def lint_one(skill, all_skills):
@@ -539,50 +620,107 @@ def cmd_cases(args):
         print(text)
 
 
+def wilson_ci(p, n, z=1.96):
+    """Wilson 置信区间 [lo, hi]。n<=0 或 p 越界返回 None。"""
+    if n <= 0 or not 0 <= p <= 1:
+        return None
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+    return [round(center - half, 3), round(center + half, 3)]
+
+
+LINE_MODEL_RE = re.compile(r'"model"\s*:\s*"([^"]+)"')
+
+
+def line_model(line_text):
+    """stream-json 行里的 message.model(模型标识), 无则 None。"""
+    m = LINE_MODEL_RE.search(line_text)
+    return m.group(1) if m else None
+
+
+def claude_version():
+    """claude CLI 版本串, 供 trigger 结果可复现(拿不到返回 None)。"""
+    import shutil
+    import subprocess
+    exe = shutil.which("claude") or shutil.which("claude.cmd") or shutil.which("claude.exe")
+    if not exe:
+        return None
+    try:
+        p = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        return (p.stdout.strip() or p.stderr.strip() or None)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def cmd_trigger(args):
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
-    print(f"# 将执行 {len(cases)} 次 claude -p 真实模型调用(花钱), 目标 skill: {args.skill}",
-          file=sys.stderr)
+    print(f"# 将执行 {len(cases)} case × {args.repeats} 次 = "
+          f"{len(cases) * args.repeats} 次 claude -p 真实模型调用(花钱), "
+          f"目标 skill: {args.skill}", file=sys.stderr)
     results = []
     test_sessions = set()
+    models = set()
     import tempfile
     # 中性 cwd: 若源 skill 目录在 cwd, 模型会直接 Read 源文件绕过 Skill 工具, 触发测试失真
     neutral_cwd = tempfile.gettempdir()
     for c in cases:
-        stream = run_claude_headless(c["prompt"], max_turns=args.max_turns,
-                                     cwd=neutral_cwd)
-        test_sessions |= collect_session_ids(stream)
-        called = []
-        for line in stream.splitlines():
-            called += extract_skill_calls(line)
-        hit = any(is_target_skill(n, args.skill) for n in called)
         expect = bool(c.get("expect", True))
-        if expect and hit:
-            verdict = "pass"
-        elif expect and not hit:
-            verdict = "miss"
-        elif not expect and hit:
-            verdict = "false_trigger"
+        hits = 0
+        called_union = set()
+        for _ in range(args.repeats):
+            stream = run_claude_headless(c["prompt"], max_turns=args.max_turns,
+                                         cwd=neutral_cwd)
+            test_sessions |= collect_session_ids(stream)
+            called = []
+            for line in stream.splitlines():
+                called += extract_skill_calls(line)
+                m = line_model(line)
+                if m:
+                    models.add(m)
+            called_union |= set(called)
+            if any(is_target_skill(n, args.skill) for n in called):
+                hits += 1
+        rate = round(hits / args.repeats, 3)
+        if expect:
+            verdict = ("stable_hit" if hits == args.repeats
+                       else "miss" if hits == 0 else "intermittent")
         else:
-            verdict = "pass_avoided"
+            verdict = "false_trigger" if hits else "pass_avoided"
         results.append({
             "prompt": c["prompt"][:80],
             "expect": expect,
-            "skills_called": called,
+            "hits": hits,
+            "repeats": args.repeats,
+            "hit_rate": rate,
+            "skills_called": sorted(called_union),
             "verdict": verdict,
         })
-    should = [r for r in results if r["expect"]]
-    shouldnt = [r for r in results if not r["expect"]]
-    hits = sum(1 for r in should if r["verdict"] == "pass")
-    falses = sum(1 for r in shouldnt if r["verdict"] == "false_trigger")
+    should_runs = sum(r["repeats"] for r in results if r["expect"])
+    should_hits = sum(r["hits"] for r in results if r["expect"])
+    shouldnt_runs = sum(r["repeats"] for r in results if not r["expect"])
+    shouldnt_hits = sum(r["hits"] for r in results if not r["expect"])
     if test_sessions:  # 测试会话进黑名单, usage/cost 不再计入
         save_trigger_blocklist(load_trigger_blocklist() | test_sessions)
+    trig = round(should_hits / should_runs, 3) if should_runs else None
+    false = round(shouldnt_hits / shouldnt_runs, 3) if shouldnt_runs else None
     print(json.dumps({
         "platform": "claude-code",
         "skill": args.skill,
         "cases": len(results),
-        "trigger_rate": round(hits / len(should), 3) if should else None,
-        "false_trigger_rate": round(falses / len(shouldnt), 3) if shouldnt else None,
+        "repeats": args.repeats,
+        "trigger_rate": trig,
+        "trigger_rate_ci": wilson_ci(trig, should_runs) if trig is not None else None,
+        "false_trigger_rate": false,
+        "false_trigger_rate_ci": wilson_ci(false, shouldnt_runs) if false is not None else None,
+        # 环境快照: 触发率跨时间可比的前提
+        "env": {
+            "claude_version": claude_version(),
+            "models": sorted(models),
+            "installed_skills_count": len(scan_skills("claude-code")[0]),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
         "test_sessions_excluded": len(test_sessions),
         "results": results,
     }, ensure_ascii=False, indent=2))
@@ -613,6 +751,59 @@ def extract_calls_with_usage(line_text):
                 out_toks = usage[k]
                 break
     return [(n, out_toks) for n in extract_skill_calls(line_text)]
+
+
+def parse_usage(line_text):
+    """行里的 usage dict(message.usage 或顶层), 无则 None。"""
+    try:
+        obj = json.loads(line_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    msg = obj.get("message") if isinstance(obj, dict) else None
+    for holder in (msg, obj):
+        if isinstance(holder, dict) and isinstance(holder.get("usage"), dict):
+            return holder["usage"]
+    return None
+
+
+def effective_input(usage):
+    """有效输入 token: input + cache 读/写(缓存命中也占上下文, 差分须算全量)。"""
+    total = 0
+    for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        v = usage.get(k)
+        if isinstance(v, int):
+            total += v
+    return total
+
+
+class InputDeltaTracker:
+    """逐行配对 skill 调用与下一轮 input, 产出注入成本实测样本。
+
+    原理: Skill 调用(tool_use / 斜杠直展)后, 下一个带 usage 的 assistant 事件
+    的 input 增量 = skill 正文 + tool_result 信封进上下文的真实成本。
+    调用所在行自身的 usage 只刷新基线不产样本(注入体现在下一轮)。
+    """
+
+    def __init__(self):
+        self.prev = None
+        self.pending = False
+
+    def note_line(self, called_target, usage):
+        """喂一行: called_target=该行含目标调用, usage=该行 usage(可 None)。
+        配对完成返回差分样本, 否则 None。"""
+        if usage is None:
+            if called_target:  # 斜杠直展行(用户消息, 无 usage)
+                self.pending = True
+            return None
+        cur = effective_input(usage)
+        sample = None
+        if called_target:
+            self.pending = True  # 刷新基线, 注入在下一轮才可见
+        elif self.pending and self.prev is not None and cur > self.prev:
+            sample = cur - self.prev
+            self.pending = False
+        self.prev = cur
+        return sample
 
 
 def cmd_cost(args):
@@ -646,23 +837,40 @@ def cmd_cost(args):
         out["dir_found"] = False
         out["hint"] = "skill 目录不在当前扫描范围(可能装在别的项目), 仅输出调用统计"
 
-    # 历史调用 + 调用轮 output_tokens 实测
+    # 历史调用 + 调用轮 output_tokens 实测 + 注入成本 input 差分实测
     log_platform = args.platform if args.platform != "all" else "claude-code"
+    known = known_skill_names(log_platform)
     counter = Counter()
+    slash_count = 0
     out_samples = []
+    in_samples = []
+    tracker = InputDeltaTracker()
     for f in iter_logs(log_platform, args.days):
         try:
             for line in f.open(encoding="utf-8", errors="replace"):
-                if '"Skill"' not in line and '"skill"' not in line:
+                # 差分需要 usage 行做基线链, 斜杠直展行也触发注入, 都不能跳过
+                if ('"usage"' not in line and '"skill"' not in line
+                        and "<command-name>" not in line):
                     continue
-                for n, t in extract_calls_with_usage(line):
-                    if is_target_skill(n, args.skill):
-                        counter[n] += 1
-                        if t is not None:
-                            out_samples.append(t)
+                called_here = False
+                if '"skill"' in line or '"Skill"' in line:
+                    for n, t in extract_calls_with_usage(line):
+                        if is_target_skill(n, args.skill):
+                            called_here = True
+                            counter[n] += 1
+                            if t is not None:
+                                out_samples.append(t)
+                for name in slash_calls_in_line(line, known):
+                    if is_target_skill(name, args.skill):
+                        called_here = True
+                        slash_count += 1
+                sample = tracker.note_line(called_here, parse_usage(line))
+                if sample is not None:
+                    in_samples.append(sample)
         except OSError:
             continue
-    out["invocations"] = sum(counter.values())
+    out["invocations"] = sum(counter.values())  # Skill 工具调用
+    out["slash_invocations"] = slash_count      # 斜杠直展(output_tokens 不可归因, 只测注入)
     if out_samples:
         avg = int(sum(out_samples) / len(out_samples))
         out["invocation_output_tokens"] = {
@@ -671,6 +879,12 @@ def cmd_cost(args):
             "max": max(out_samples),
             # 总账: 窗口内全部调用按样本均值折算(实测样本覆盖不足时为估)
             "total_est": out["invocations"] * avg,
+        }
+    if in_samples:
+        out["injection_input_tokens"] = {
+            "samples": len(in_samples),
+            "avg": int(sum(in_samples) / len(in_samples)),
+            "max": max(in_samples),
         }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
@@ -812,6 +1026,8 @@ def main():
     p_trig.add_argument("--cases", required=True, help="cases.json 路径")
     p_trig.add_argument("--max-turns", type=int, default=2,
                         help="单 case claude 会话轮数上限(默认 2)")
+    p_trig.add_argument("--repeats", type=int, default=1,
+                        help="每 case 重复次数(默认 1; ≥3 配合置信区间更有意义)")
 
     p_cases = sub.add_parser("cases", help="从 usage 历史采样生成 trigger 测试集")
     p_cases.add_argument("--skill", required=True, help="目标 skill 名")

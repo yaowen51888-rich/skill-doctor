@@ -9,9 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 from doctor import (  # noqa: E402
-    case_role, collect_session_ids, est_tokens, extract_skill_calls,
-    extract_slash_commands, first_user_prompt, is_target_skill,
-    lint_one, overlap_rate, parse_frontmatter,
+    InputDeltaTracker, case_role, cluster_prompts, collect_session_ids,
+    effective_input, est_tokens, extract_skill_calls, extract_slash_commands,
+    first_user_prompt, is_target_skill, lint_one, overlap_rate,
+    parse_frontmatter, parse_usage, scenarios_for, wilson_ci,
 )
 
 # --- 三平台提取形态 ---
@@ -90,6 +91,46 @@ assert lint_one({**BASE, "model_invocable": False}, [])["R7"] == \
     "disabled_model_invocation", "disable-model-invocation=true 报 R7"
 assert lint_one({**BASE, "frontmatter_ok": False}, [])["R7"] == \
     "no_frontmatter", "frontmatter 缺失报 R7"
+
+# --- wilson 置信区间 ---
+ci = wilson_ci(0.8, 10)
+assert ci and abs(ci[0] - 0.490) < 0.002 and abs(ci[1] - 0.943) < 0.002, ci
+assert wilson_ci(0, 0) is None, "n=0 无区间"
+assert wilson_ci(1, 8) == [1.0, 1.0] or wilson_ci(1, 8)[0] > 0.6, wilson_ci(1, 8)
+
+# --- 实测注入: effective_input + 差分配对 ---
+U_FULL = {"input_tokens": 100, "cache_read_input_tokens": 50,
+          "cache_creation_input_tokens": 10}
+assert effective_input(U_FULL) == 160
+assert effective_input({}) == 0
+assert parse_usage('{"message":{"usage":{"input_tokens":100}}}') == \
+    {"input_tokens": 100}
+assert parse_usage(NOISE_LINE) is None
+
+tr = InputDeltaTracker()
+assert tr.note_line(True, {"input_tokens": 100}) is None, "调用行只设基线"
+assert tr.note_line(False, {"input_tokens": 260}) == 160, "下一轮差分=注入成本"
+assert tr.note_line(False, {"input_tokens": 270}) is None, "pending 已清"
+tr2 = InputDeltaTracker()
+tr2.note_line(True, {"input_tokens": 100})
+assert tr2.note_line(True, {"input_tokens": 120}) is None, "连续调用刷新基线"
+assert tr2.note_line(False, {"input_tokens": 300}) == 180
+tr3 = InputDeltaTracker()
+tr3.note_line(True, None)  # 斜杠直展: 用户行无 usage
+assert tr3.note_line(False, {"input_tokens": 200}) is None, "无前值(首轮)跳过"
+tr4 = InputDeltaTracker()
+tr4.note_line(False, {"input_tokens": 150})
+tr4.note_line(True, None)
+assert tr4.note_line(False, {"input_tokens": 330}) == 180, "斜杠直展后差分"
+
+# --- 场景聚类 ---
+A = ["帮我查今天的AI新闻", "查一下今天的AI新闻有什么", "看看今天的AI新闻动态"]
+B = ["extract pdf tables", "extract pdf tables from file", "merge pdf tables"]
+clusters = cluster_prompts(A + B)
+assert sorted(len(c) for c in clusters) == [3, 3], f"两簇分离失败: {clusters}"
+assert scenarios_for(["a", "b"]) is None, "不足 3 条不聚类"
+sc = scenarios_for(A + B)
+assert sc and sc[0]["count"] >= 3 and len(sc[0]["top_terms"]) >= 1, sc
 
 # --- 竞争重叠率 ---
 assert overlap_rate("", "x") == 0.0

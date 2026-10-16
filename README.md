@@ -10,7 +10,7 @@
 
 | 好不好用 | 费不费钱 |
 |---|---|
-| 触发率**实测**（逐 case 跑真实模型调用，非静态打分） | description / body / 随身文件三笔 token 账 |
+| 触发率**实测**（逐 case 跑真实模型调用，非静态打分） | 注入成本实测：调用后 input_tokens 差分 |
 | lint：description 质量、skill 间竞争、模型可见性 | 每次调用轮 output_tokens 实测 |
 | usage：谁被用过、谁装了没动 | 估算与实测分口径，不折算金额 |
 
@@ -80,10 +80,10 @@ python scripts/doctor.py cost --skill aihot
 |------|--------|
 | `list` | 枚举已装 skill 及 frontmatter |
 | `lint` | 机械检查：description 长度、场景信号、竞争重叠率、name 规范、**模型可见性**、YAML 多行折叠 |
-| `usage` | 历史调用统计：Skill 工具调用与斜杠直展分列，零调用已装 skill 单列 |
+| `usage` | 历史调用统计：Skill 工具调用与斜杠直展分列，零调用已装 skill 单列，真实使用场景语义聚类（top3） |
 | `cases` | 从真实历史采样触发测试集，反例按竞争度排序 |
-| `trigger` | 触发率实测：trigger_rate / false_trigger_rate + 逐条明细 |
-| `cost` | token 三笔账 + 调用轮 output_tokens 实测与窗口总账 |
+| `trigger` | 触发率实测：trigger_rate / false_trigger_rate + Wilson 置信区间（`--repeats`）+ 环境快照，逐 case 明细 |
+| `cost` | token 三笔账 + 调用轮 output_tokens 实测 + **注入成本实测**（调用后 input_tokens 差分，斜杠直展同计） |
 | `drift` | 内容漂移检测：快照 diff，谁改了什么 |
 | `visibility` | OpenClaw 配置审计：skill 对哪些 agent 可见 |
 
